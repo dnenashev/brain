@@ -75,7 +75,10 @@ class ReviewState:
             return [card for card in self.state['queue'] if card['project_id'] == project_id]
 
     def get_review(self, project_id, task_id):
-        return next((card for card in self.list_reviews(project_id) if card['task_id'] == task_id), None)
+        with self.lock:
+            decided = [record['card'] for record in self.state['decisions'] if 'card' in record]
+            return next((card for card in self.state['queue'] + decided
+                         if (card['project_id'], card['task_id']) == (project_id, task_id)), None)
 
     def record_decision(self, project_id, task_id, candidate_sha, decision, comment, actor_id):
         started = monotonic()
@@ -86,6 +89,7 @@ class ReviewState:
                 return False
             record = dict(project_id=project_id, task_id=task_id, candidate_sha=candidate_sha,
                           decision=decision, comment=comment, actor_id=actor_id)
+            record['card'] = {**card, 'status': 'changes_requested' if decision == 'return' else 'approved'}
             updated = {'queue': [item for item in queue if item is not card],
                        'decisions': [*self.state['decisions'], record]}
             _write_json(self.path, updated)
