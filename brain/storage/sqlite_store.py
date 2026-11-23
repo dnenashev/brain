@@ -99,18 +99,18 @@ class SQLiteKnowledgeStore:
     def put_revision(self, project_id, doc_id, text, readers):
         with self._lock, self._connection as connection:
             connection.execute("BEGIN IMMEDIATE")
-            return put_revision_in_transaction(connection, project_id, doc_id, text, readers)
+            return put_revision_in_transaction(
+                connection, project_id, doc_id, text, readers
+            )
 
     def read(self, project_id, doc_id, *, subject, version=None):
         with self._lock:
             row = self._connection.execute(
                 """
                 WITH latest AS (
-                    SELECT id, version
-                    FROM document_revisions
+                    SELECT id, version FROM document_revisions
                     WHERE project_id = :project_id AND doc_id = :doc_id
-                    ORDER BY version DESC
-                    LIMIT 1
+                    ORDER BY version DESC LIMIT 1
                 )
                 SELECT revision.doc_id, revision.version, revision.text
                 FROM latest
@@ -160,6 +160,8 @@ class SQLiteKnowledgeStore:
         return [dict(row) for row in rows]
 
     def search(self, project_id, query, *, subject):
+        if not query.strip():
+            return []
         with self._lock:
             rows = self._connection.execute(
                 """
@@ -175,6 +177,6 @@ class SQLiteKnowledgeStore:
                     AND current_revision_fts MATCH :query
                 ORDER BY revision.doc_id
                 """,
-                {"project_id": project_id, "subject": subject, "query": query},
+                {"project_id": project_id, "query": query, "subject": subject},
             ).fetchall()
         return [dict(row) for row in rows]
