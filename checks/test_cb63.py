@@ -39,7 +39,7 @@ class GitImport(unittest.TestCase):
         self.assertEqual(plan["commit"], self.commit_id)
         self.assertEqual(plan["missing_links"], [])
         self.assertEqual(plan["inventory"]["active/rule.md"]["sha256"], hashlib.sha256(self.files["active/rule.md"]).hexdigest())
-        self.assertEqual(apply_git_import(plan, self.changes, actor="operator", dry_run=True)["changes"], 2)
+        self.assertEqual(apply_git_import(plan, self.changes, actor="operator", dry_run=True)["planned_changes"], 2)
         self.assertEqual(self.store.read("P1", "active/rule.md", subject="alice")["version"], 1)
         receipt = apply_git_import(plan, self.changes, actor="operator")
         self.assertEqual(apply_git_import(plan, self.changes, actor="operator"), receipt)
