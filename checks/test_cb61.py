@@ -23,8 +23,14 @@ class ServerStorage(unittest.TestCase):
                          {"doc_id": "timeout", "version": 1, "text": "legacy rule"})
         self.assertEqual(reopened.snapshot("P1", subject="alice"),
                          [{"doc_id": "timeout", "version": 2, "text": "current rule"}])
+        migrations = Path(__file__).resolve().parents[1] / "brain/storage/migrations"
+        versions = [
+            int(path.stem) for path in migrations.glob("*.sql")
+            if path.stem.isascii() and path.stem.isdecimal()
+        ]
+        self.assertTrue(versions)
         with sqlite3.connect(self.path) as database:
-            self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], max(versions))
 
     def test_search_limits_project_acl_and_current_version(self):
         self.store.put_revision("P1", "same-id", "oldmarker timeout", ["alice"])
