@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Пакет Company Brain v1",
+  "description": "Пакет результата описывает кандидата. Решение о принятии фиксирует оператор.",
+  "type": "object",
+  "required": ["schema_version", "task_id", "outcome", "rule_snapshot", "constraints"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "task_id": { "$ref": "#/$defs/nonblank" },
+    "outcome": { "enum": ["result", "rejected", "needs_clarification"] },
+    "rule_snapshot": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "revision", "source"],
+        "properties": {
+          "rule_id": { "$ref": "#/$defs/nonblank" },
+          "revision": {
+            "anyOf": [{ "type": "integer" }, { "$ref": "#/$defs/nonblank" }]
+          },
+          "source": { "$ref": "#/$defs/nonblank" }
+        }
+      }
+    },
+    "constraints": { "type": "array", "items": { "$ref": "#/$defs/nonblank" } },
+    "candidate_sha": { "type": "string", "maxLength": 40, "pattern": "^[0-9a-fA-F]{40}$" },
+    "reason": { "$ref": "#/$defs/nonblank" },
+    "missing": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/nonblank" } }
+  },
+  "if": { "properties": { "outcome": { "const": "needs_clarification" } } },
+  "then": { "required": ["missing"] },
+  "else": {
+    "properties": {
+      "rule_snapshot": { "minItems": 1 },
+      "constraints": { "minItems": 1 }
+    },
+    "if": { "properties": { "outcome": { "const": "result" } } },
+    "then": { "required": ["candidate_sha"] },
+    "else": { "required": ["reason"] }
+  },
+  "$defs": {
+    "nonblank": {
+      "$comment": "At least one character that Python str.strip() does not remove.",
+      "type": "string",
+      "pattern": "[^\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]"
+    }
+  }
+}
