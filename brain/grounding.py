@@ -26,7 +26,7 @@ def resolve_rule(cards, *, knowledge_id, scope, today, read_source, record_read)
     except FileNotFoundError:
         pass
     finally:
-        available = bool(fragment)
+        available = isinstance(fragment, str) and bool(fragment.strip())
         record_read({
             "source": selected.source,
             "revision": selected.revision,
