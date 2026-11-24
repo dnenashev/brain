@@ -251,8 +251,6 @@ class LiveWorkflow:
         sha = body.get("candidate_sha")
         if not isinstance(sha, str) or not _SHA.fullmatch(sha):
             raise ValueError("Invalid candidate SHA")
-        if not self.reviews.is_approved(project_id, task_id, sha, draft_id, revision):
-            raise PermissionError("Candidate must be approved for this draft revision")
         request = {**{key: value for key, value in body.items() if key != "approval"}, "action": "publish"}
         approval = {"verified": True, "project_id": project_id, "revision": revision,
                     "request_digest": policy.request_digest(request)}
@@ -260,6 +258,7 @@ class LiveWorkflow:
             project_id, draft_id, revision, actor=actor["actor_id"], change_id=change_id,
             authorize_publish=lambda current: policy.authorize(actor, request, current_revision=current, approval=approval),
             authorize_change=self._access(actor, approved=True), validate_batch=self._validate_batch(actor),
+            review=(task_id, sha),
         )
 
     def _audit_summary(self, actor, trace_id):

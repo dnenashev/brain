@@ -10,6 +10,7 @@ from uuid import uuid4
 from . import policy
 from .live_workflow import ACTIONS, WorkflowError, validate_change
 from .storage.changesets import DraftConflict
+from .storage.review_state import ReviewConflict
 from .write_access import ApprovalRegistry, check_write_access
 
 
@@ -94,6 +95,8 @@ class KnowledgeService:
                 return self._write(actor, token, body)
             except WorkflowError as error:
                 return error.status, error.response
+            except ReviewConflict as error:
+                return 409, {"error": str(error)}
             except ValueError as error:
                 message = str(error)
                 if isinstance(error, DraftConflict) or message.startswith("Version conflict ") or (

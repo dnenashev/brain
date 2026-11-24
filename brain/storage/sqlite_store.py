@@ -93,6 +93,17 @@ class SQLiteKnowledgeStore:
             with closing(self._connect()) as connection:
                 yield connection
 
+    @contextmanager
+    def connection(self):
+        with self._lock, self._database() as connection:
+            yield connection
+
+    @contextmanager
+    def transaction(self):
+        with self.connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            yield connection
+
     def close(self):
         with self._lock:
             self._closed = True

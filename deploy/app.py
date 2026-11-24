@@ -6,16 +6,16 @@ from contextlib import ExitStack
 from fcntl import LOCK_EX, LOCK_NB, flock
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from threading import Event, Lock, Thread
+from threading import Event, Thread
 from time import monotonic
 from uuid import uuid4
 
 from brain.audit import AuditLog
-from brain.live_workflow import LiveWorkflow, WorkflowError
-from brain.review import ReviewLedger
+from brain.live_workflow import LiveWorkflow
 from brain.server import KnowledgeService, make_http_server
 from brain.session import SessionRegistry
 from brain.storage.changesets import ChangeSetStore
+from brain.storage.review_state import ReviewState
 from brain.storage.sqlite_store import SQLiteKnowledgeStore
 from brain.web_api import ReviewWeb, make_review_server
 
@@ -58,128 +58,6 @@ def _seed_queue(path):
         seen.add((project_id, task_id))
         queue.append(card)
     return queue
-
-
-class ReviewState:
-    def __init__(self, path, seed, audit):
-        self.path = path
-        self.audit = audit
-        self.lock = Lock()
-        if path.exists():
-            self.state = json.loads(path.read_text(encoding='utf-8'))
-        else:
-            self.state = {'queue': _seed_queue(seed), 'decisions': []}
-            _write_json(path, self.state)
-
-    def list_reviews(self, project_id):
-        with self.lock:
-            return [card for card in self.state['queue'] if card['project_id'] == project_id]
-
-    def get_review(self, project_id, task_id):
-        with self.lock:
-            decided = [record['card'] for record in reversed(self.state['decisions']) if 'card' in record]
-            return next((card for card in self.state['queue'] + decided
-                         if (card['project_id'], card['task_id']) == (project_id, task_id)), None)
-
-    def enqueue(self, card):
-        started = monotonic()
-        project_id, task_id, sha = (card[key] for key in ('project_id', 'task_id', 'candidate_sha'))
-        with self.lock:
-            queue = self.state['queue']
-            prior = [record for record in self.state['decisions']
-                     if (record['project_id'], record['task_id']) == (project_id, task_id)]
-            queued = next((item for item in queue if
-                           (item['project_id'], item['task_id']) == (project_id, task_id)), None)
-            exact = next((record.get('card') for record in prior if record['candidate_sha'] == sha), None)
-            if queued is not None and queued['candidate_sha'] == sha:
-                exact = queued
-            if exact is not None:
-                fields = ('author', 'draft_id', 'revision', 'handoff')
-                if all(exact.get(field) == card[field] for field in fields):
-                    self._audit_enqueue(exact, started, 'duplicate')
-                    return False
-                raise WorkflowError(409, 'candidate_payload_conflict')
-            if queued is not None or (prior and prior[-1]['decision'] == 'approve'):
-                raise WorkflowError(409, 'task_in_review_or_approved')
-            if prior:
-                previous = prior[-1]['card']
-                if previous.get('author') != card['author'] or previous.get('draft_id') != card['draft_id']:
-                    raise WorkflowError(409, 'candidate_owner_conflict')
-                if card['revision'] <= previous['revision']:
-                    raise WorkflowError(409, 'candidate_revision_conflict')
-                card = {**card, 'feedback': previous['feedback']}
-            used_draft = any(
-                (item.get('project_id'), item.get('draft_id'), item.get('revision'))
-                == (project_id, card['draft_id'], card['revision'])
-                for item in [*queue, *(record.get('card', {}) for record in self.state['decisions'])]
-            )
-            if used_draft:
-                raise WorkflowError(409, 'draft_revision_already_in_review')
-            updated = {'queue': [*queue, card], 'decisions': self.state['decisions']}
-            _write_json(self.path, updated)
-            self.state = updated
-            self._audit_enqueue(card, started, 'ok')
-            return True
-
-    def _audit_enqueue(self, card, started, outcome):
-        self.audit.append(trace_id=card['trace_id'], project_id=card['project_id'], step='review_enqueued',
-                          outcome=outcome, details={'duration_ms': (monotonic() - started) * 1000})
-
-    def _ledger(self, project_id, task_id):
-        ledger = ReviewLedger()
-        previous = None
-        for record in self.state['decisions']:
-            if ((record['project_id'], record['task_id']) != (project_id, task_id)
-                    or 'draft_id' not in record.get('card', {})):
-                continue
-            sha = record['candidate_sha']
-            if record['decision'] == 'approve':
-                ledger.approve(task_id, sha, operator=record['actor_id'])
-            else:
-                ledger.record_feedback(sha, task_id=task_id, candidate_sha=sha,
-                                       text=record['comment'], previous_id=previous)
-                previous = sha
-        return ledger, previous
-
-    def is_approved(self, project_id, task_id, sha, draft_id, revision):
-        with self.lock:
-            ledger, _ = self._ledger(project_id, task_id)
-            if not ledger.is_approved(task_id, sha):
-                return False
-            return any(
-                (item['project_id'], item['task_id'], item['candidate_sha'], item['decision'],
-                 item.get('card', {}).get('draft_id'), item.get('card', {}).get('revision'))
-                == (project_id, task_id, sha, 'approve', draft_id, revision)
-                for item in self.state['decisions']
-            )
-
-    def record_decision(self, project_id, task_id, candidate_sha, decision, comment, actor_id):
-        started = monotonic()
-        with self.lock:
-            queue = self.state['queue']
-            card = next((item for item in queue if (item['project_id'], item['task_id']) == (project_id, task_id)), None)
-            if card is None or card['candidate_sha'] != candidate_sha:
-                return False
-            record = dict(project_id=project_id, task_id=task_id, candidate_sha=candidate_sha,
-                          decision=decision, comment=comment, actor_id=actor_id)
-            feedback = comment if decision == 'return' else card.get('feedback')
-            if 'draft_id' in card:
-                ledger, previous = self._ledger(project_id, task_id)
-                if decision == 'return':
-                    feedback = ledger.record_feedback(candidate_sha, task_id=task_id, candidate_sha=candidate_sha,
-                                                      text=comment, previous_id=previous).text
-                else:
-                    ledger.approve(task_id, candidate_sha, operator=actor_id)
-            record['card'] = {**card, 'status': 'changes_requested' if decision == 'return' else 'approved',
-                              'feedback': feedback}
-            updated = {'queue': [item for item in queue if item is not card],
-                       'decisions': [*self.state['decisions'], record]}
-            _write_json(self.path, updated)
-            self.state = updated
-            self.audit.append(trace_id=card.get('trace_id', task_id), project_id=project_id, step='decision',
-                              outcome='returned' if decision == 'return' else 'approved',
-                              details={'duration_ms': (monotonic() - started) * 1000})
-            return True
 
 
 class AuditedKnowledge(KnowledgeService):
@@ -246,7 +124,7 @@ def run(config):
             project_subjects.setdefault(identity['project_id'], set()).add(identity['actor_id'])
         store = cleanup.enter_context(SQLiteKnowledgeStore(database))
         changesets = cleanup.enter_context(ChangeSetStore(database))
-        state = ReviewState(data_dir / 'review.json', config['review_seed'], audit)
+        state = ReviewState(store, data_dir / 'review.json', lambda: _seed_queue(config['review_seed']), audit)
         workflow = LiveWorkflow(store, changesets, state, audit, project_subjects,
                                 limits=config.get('limits'), directives=config.get('directives'))
         knowledge = AuditedKnowledge(

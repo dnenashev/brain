@@ -106,6 +106,7 @@ def backup(source_dir, archive_path):
                 if name in _DATABASES:
                     snapshot = stage / name
                     _snapshot_database(path, snapshot)
+                    _check_database(snapshot)
                     path = snapshot
                 with path.open("rb") as original, archive.open(name, "w", force_zip64=True) as member:
                     files[name] = _hash_stream(original, member)

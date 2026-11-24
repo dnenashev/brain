@@ -48,7 +48,7 @@ class ChangeSetStore(SQLiteKnowledgeStore):
                 }
                 for doc_id, version in versions.items()
             ]
-            return self._record_changeset(
+            receipt = self._record_changeset(
                 connection,
                 compensation_id,
                 original["project_id"],
@@ -56,6 +56,12 @@ class ChangeSetStore(SQLiteKnowledgeStore):
                 changes,
                 compensates=change_id, authorize_change=authorize_change,
             )
+            connection.execute(
+                "UPDATE review_decisions SET compensated_by = ? WHERE project_id = ? AND published_change_id = ?",
+                (compensation_id, original["project_id"], change_id),
+            )
+            return receipt
+
 
     def save_draft(self, project_id, draft_id, actor, change, *, authorize_change, validate_batch, max_drafts):
         with self._lock, self._database() as connection, connection:
@@ -94,30 +100,45 @@ class ChangeSetStore(SQLiteKnowledgeStore):
             return json.loads(draft["payload"]) if draft is not None else None
 
     def publish_draft(self, project_id, draft_id, revision, *, actor, change_id,
-                      authorize_publish, authorize_change, validate_batch):
+                      authorize_publish, authorize_change, validate_batch, review=None, record_rule=None):
         with self._lock, self._database() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             draft = connection.execute(
-                "SELECT revision, payload, change_id FROM drafts "
+                "SELECT revision, payload, change_id, author FROM drafts "
                 "WHERE project_id = ? AND draft_id = ? ORDER BY revision DESC LIMIT 1",
                 (project_id, draft_id),
             ).fetchone()
             if draft is None or not authorize_publish(draft["revision"]):
                 raise PermissionError("Approval for the latest draft revision is required")
+            decision_key = (project_id, *review, draft_id, revision) if review else None
+            if decision_key is not None:
+                decision = connection.execute(
+                    "SELECT event_id FROM review_decisions WHERE project_id = ? AND task_id = ? "
+                    "AND candidate_sha = ? AND draft_id = ? AND draft_revision = ? AND decision = 'approve'",
+                    decision_key,
+                ).fetchone()
+                if decision is None:
+                    raise PermissionError("Candidate must be approved for this draft revision")
             if draft["change_id"] not in (None, change_id):
                 raise DraftConflict("The draft was already published")
             if draft["change_id"] is None and connection.execute(
                 "SELECT 1 FROM changesets WHERE change_id = ?", (change_id,)
             ).fetchone():
                 raise DraftConflict("Publication requires a new changeset ID")
+            change = json.loads(draft["payload"])
             receipt = self._record_changeset(
-                connection, change_id, project_id, actor, [json.loads(draft["payload"])],
+                connection, change_id, project_id, actor, [change],
                 compensates=None, authorize_change=authorize_change, validate_batch=validate_batch,
             )
             connection.execute(
                 "UPDATE drafts SET change_id = ? WHERE project_id = ? AND draft_id = ? AND revision = ?",
                 (change_id, project_id, draft_id, revision),
             )
+            if record_rule is not None and draft["change_id"] is None:
+                record_rule(connection, change, receipt["versions"][change["doc_id"]], draft["author"])
+            if decision_key is not None:
+                connection.execute("UPDATE review_decisions SET published_change_id = ? WHERE event_id = ?",
+                                   (change_id, decision["event_id"]))
             return receipt
 
     @staticmethod
