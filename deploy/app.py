@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from brain.audit import AuditLog
 from brain.live_workflow import LiveWorkflow
+from brain.observer import AuditReadiness
 from brain.server import KnowledgeService, make_http_server
 from brain.session import SessionRegistry
 from brain.storage.changesets import ChangeSetStore
@@ -130,10 +131,12 @@ def run(config):
                                 directive_files=config.get('directive_files'))
         knowledge = AuditedKnowledge(
             store, changesets, sessions, audit, project_subjects=project_subjects, workflow=workflow,
+            readiness=AuditReadiness(audit, recovery_owner="operator").check,
         )
         cleanup.callback(knowledge.close)
         web = ReviewWeb(sessions, list_reviews=state.list_reviews, get_review=state.get_review,
-                        record_decision=state.record_decision)
+                        record_decision=state.record_decision, enrich_review=workflow.enrich_review,
+                        audit_summary=lambda actor: workflow.audit_summary(actor, event_limit=30))
         bind = config['bind']
         api = cleanup.enter_context(make_http_server(knowledge, host=bind, port=config['http_port']))
         review = cleanup.enter_context(make_review_server(web, host=bind, port=config['review_port']))

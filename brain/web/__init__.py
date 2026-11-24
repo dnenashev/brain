@@ -12,6 +12,10 @@ _FIELD_LABELS = {
     "sources": "Источники",
     "tests": "Тесты",
     "feedback": "Замечания",
+    "impact": "Влияние",
+    "queued_at": "Поставлено в очередь",
+    "published_change_id": "Набор публикации",
+    "compensated_by": "Набор отката",
 }
 REVIEW_FIELDS = tuple(_FIELD_LABELS)
 _QUEUE_DETAILS = ("candidate_sha", "changes", "risks", "sources", "tests", "feedback")
@@ -81,7 +85,7 @@ def _fields(review, fields):
     return f"<dl>{entries}</dl>"
 
 
-def render_queue(reviews):
+def render_queue(reviews, *, ops=False):
     cards = []
     for review in reviews:
         task_id = review["task_id"]
@@ -93,7 +97,8 @@ def render_queue(reviews):
             '</article>'
         )
     content = "".join(cards) or "<p>Очередь пуста.</p>"
-    return _page("Очередь приёмки", f"<h1>Очередь приёмки</h1>{content}")
+    navigation = '<nav><a href="/ops">Состояние стенда</a></nav>' if ops else ""
+    return _page("Очередь приёмки", f"{navigation}<h1>Очередь приёмки</h1>{content}")
 
 
 def render_review(review, *, task_id, form_token):
@@ -113,4 +118,31 @@ def render_review(review, *, task_id, form_token):
         '<button type="submit" name="decision" value="approve">Принять</button>'
         '<button type="submit" name="decision" value="return">Вернуть</button>'
         '</div></form>',
+    )
+
+
+def render_ops(report):
+    observer = report["observer"]
+    telemetry = report["telemetry"]
+    status = {
+        "Observer": observer["health"],
+        "sequence_gap": observer["sequence_gap"],
+        "policy_denied": observer["policy_denied"],
+        "recovery_owner": observer["recovery_owner"],
+        "queue_lag_seconds": round(telemetry["queue_lag_seconds"], 3),
+        "returns": telemetry["returns"],
+        "versions": telemetry["versions"],
+        "used_bytes": telemetry["used_bytes"],
+    }
+    steps = {
+        name: {"count": values["count"], "avg_ms": round(values["total_ms"] / values["count"], 3),
+               "max_ms": round(values["max_ms"], 3)}
+        for name, values in telemetry["steps"].items()
+    }
+    return _page(
+        "Состояние стенда",
+        '<nav><a href="/">Очередь приёмки</a></nav>'
+        f'<h1>Состояние стенда</h1>{_value(status)}'
+        f'<h2>Время выполнения</h2>{_value(steps)}'
+        f'<h2>Последние события аудита</h2>{_value(report["events"][::-1])}',
     )

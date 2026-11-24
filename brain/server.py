@@ -35,12 +35,13 @@ _DATA_ACTIONS = {"/read": "read", "/search": "read", "/write": "write"}
 
 
 class KnowledgeService:
-    def __init__(self, store, changesets, sessions, *, project_subjects=None, workflow=None):
+    def __init__(self, store, changesets, sessions, *, project_subjects=None, workflow=None, readiness=None):
         self._store = store
         self._changesets = changesets
         self._sessions = sessions
         self._project_subjects = project_subjects or {}
         self._workflow = workflow
+        self._readiness = readiness
         self._approvals = ApprovalRegistry()
         self._lock = Lock()
         self._closed = False
@@ -52,6 +53,12 @@ class KnowledgeService:
             if self._closed:
                 return 503, {"error": "service_unavailable"}
             if method == "GET" and path == "/ready":
+                if self._readiness is not None:
+                    try:
+                        if not self._readiness():
+                            return 503, {"ready": False, "reason": "audit_sequence_gap"}
+                    except (sqlite3.Error, ValueError):
+                        return 503, {"ready": False, "reason": "audit_unavailable"}
                 return 200, {"status": "ready"}
             if method != "POST":
                 return 404, {"error": "not_found"}

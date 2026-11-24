@@ -9,7 +9,7 @@ from ipaddress import ip_address
 from secrets import compare_digest
 from urllib.parse import parse_qs, unquote
 
-from .web import REVIEW_FIELDS, render_queue, render_review, review_url
+from .web import REVIEW_FIELDS, render_ops, render_queue, render_review, review_url
 
 
 _HTML = "text/html; charset=utf-8"
@@ -24,12 +24,14 @@ def _error(status, code):
 
 
 class ReviewWeb:
-    def __init__(self, sessions, *, list_reviews, get_review, record_decision, form_token=None):
+    def __init__(self, sessions, *, list_reviews, get_review, record_decision, form_token=None, enrich_review=None, audit_summary=None):
         self._sessions = sessions
         self._list_reviews = list_reviews
         self._get_review = get_review
         self._record_decision = record_decision
         self._form_token = form_token
+        self._enrich_review = enrich_review
+        self._audit_summary = audit_summary
 
     def dispatch(self, method, path, *, token=None, form=None):
         actor = self._sessions.resolve(token)
@@ -44,8 +46,10 @@ class ReviewWeb:
         project_id = actor["project_id"]
 
         path = path.partition("?")[0]
+        if method == "GET" and path == "/ops" and self._audit_summary is not None:
+            return 200, _HTML, render_ops(self._audit_summary(actor))
         if method == "GET" and path == "/":
-            queue = render_queue(self._list_reviews(project_id))
+            queue = render_queue(self._list_reviews(project_id), ops=self._audit_summary is not None)
             csrf = self._token_for(token)
             if csrf is not None:
                 form = ('<form method="post" action="/logout"><button>Sign out</button>'
@@ -72,6 +76,8 @@ class ReviewWeb:
         review = self._get_review(project_id, task_id)
         if review is None:
             return _error(404, "not_found")
+        if self._enrich_review is not None:
+            review = self._enrich_review(actor, review)
         if prefix == "api/reviews":
             card = {field: review.get(field) for field in REVIEW_FIELDS}
             return 200, _JSON, json.dumps(card)

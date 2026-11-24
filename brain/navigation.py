@@ -1,4 +1,5 @@
 import os
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -9,6 +10,19 @@ from .git_store import (
     _validate_area,
     _validate_filename,
 )
+
+
+_DOCUMENT_REF = re.compile(r"doc:(.{1,128})@([1-9][0-9]{0,17})")
+
+
+def parse_document_reference(ref):
+    """Parse a versioned document link. The caller supplies its authorized project."""
+    match = _DOCUMENT_REF.fullmatch(ref) if isinstance(ref, str) else None
+    return (match[1], int(match[2])) if match is not None else None
+
+
+def document_reference(doc_id, version):
+    return f"doc:{doc_id}@{version}"
 
 
 @contextmanager

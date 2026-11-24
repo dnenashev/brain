@@ -3,7 +3,7 @@
 from datetime import datetime
 
 
-def summarize(events, *, now, versions, used_bytes, queue_oldest_at=None):
+def summarize(events, *, now, versions, used_bytes, queue_oldest_at=None, sequence_gap=0, step_extrema=False):
     """Aggregate step durations and locate the latest failure in audit order."""
     steps = {}
     returns = 0
@@ -20,6 +20,8 @@ def summarize(events, *, now, versions, used_bytes, queue_oldest_at=None):
             totals = steps.setdefault(step, {"count": 0, "total_ms": 0})
             totals["count"] += 1
             totals["total_ms"] += duration_ms
+            if step_extrema:
+                totals["max_ms"] = max(duration_ms, totals.get("max_ms", 0))
 
         if outcome == "returned":
             returns += 1
@@ -44,6 +46,7 @@ def summarize(events, *, now, versions, used_bytes, queue_oldest_at=None):
 
     return {
         "steps": steps,
+        "health": "degraded" if sequence_gap else "ok",
         "returns": returns,
         "policy_denials": policy_denials,
         "queue_lag_seconds": queue_lag_seconds,

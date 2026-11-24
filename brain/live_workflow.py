@@ -7,10 +7,10 @@ from . import policy
 from .directive_files import LEVELS
 from .handoff import issue_handoff
 from .instructions import resolve_directives
+from .navigation import parse_document_reference as parse_reference
 from .observer import Observer
 from .operations import live_rules
 from .operations.hygiene import lint_before_write
-from .operations.live_rules import parse_reference
 from .operations.telemetry import summarize, summarize_check_results
 from .storage.changesets import DraftConflict
 from .write_access import check_write_access
@@ -156,7 +156,7 @@ class LiveWorkflow:
         if path == "/identity":
             return 200, {key: actor[key] for key in ("actor_id", "project_id", "role")}
         if path == "/ops/audit-summary":
-            return 200, self._audit_summary(actor, body.get("trace_id", trace_id))
+            return 200, self.audit_summary(actor, body.get("trace_id", trace_id))
         if path == "/resolve":
             return 200, live_rules.resolve(self.store, self.audit, actor, self._rule_id(body.get("rule_id")), trace_id)
         if path == "/impact":
@@ -322,16 +322,17 @@ class LiveWorkflow:
             ),
         )
 
-    def _audit_summary(self, actor, trace_id):
+    def audit_summary(self, actor, trace_id=None, *, event_limit=None):
         from .server import valid_trace_id
 
-        if not valid_trace_id(trace_id):
+        if trace_id is not None and not valid_trace_id(trace_id):
             raise ValueError("Invalid trace ID")
         project_id = actor["project_id"]
         events = self.audit.read_after(include_project=True)
         selected = [
             {key: value for key, value in event.items() if key != "project_id"}
-            for event in events if (event["project_id"], event["trace_id"]) == (project_id, trace_id)
+            for event in events if event["project_id"] == project_id
+            and (trace_id is None or event["trace_id"] == trace_id)
         ]
         selected_sequences = {event["seq"] for event in selected}
         observation = Observer(lambda _: events, recovery_owner=actor["actor_id"]).inspect()
@@ -340,9 +341,17 @@ class LiveWorkflow:
             if issue.get("seq", issue.get("actual_seq")) in selected_sequences
         ]
         usage = self.store.project_usage(project_id)
+        gaps = sum(issue["kind"] == "sequence_gap" for issue in issues)
+        telemetry = summarize(
+            selected, now=datetime.now(timezone.utc).isoformat(), versions=usage["versions"],
+            used_bytes=usage["used_bytes"], queue_oldest_at=self.reviews.oldest(project_id),
+            sequence_gap=gaps, step_extrema=True,
+        )
         return {
-            "trace_id": trace_id, "events": selected,
-            "observer": {"issues": issues, "sequence_gap": sum(issue["kind"] == "sequence_gap" for issue in issues)},
-            "telemetry": summarize(selected, now=datetime.now(timezone.utc).isoformat(),
-                                   versions=usage["versions"], used_bytes=usage["used_bytes"]),
+            "trace_id": trace_id, "events": selected if event_limit is None else selected[-event_limit:],
+            "observer": {
+                "issues": issues, "sequence_gap": gaps, "health": telemetry["health"],
+                "policy_denied": telemetry["policy_denials"], "recovery_owner": actor["actor_id"],
+            },
+            "telemetry": telemetry,
         }

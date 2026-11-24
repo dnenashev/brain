@@ -13,7 +13,7 @@ from uuid import uuid4
 from .adapters.mcp import CodeMode
 from .adapters.secret_broker import SecretBroker
 from .adapters.swarm_mcp import SwarmReadOnly
-from .live_workflow import parse_reference
+from .navigation import parse_document_reference
 from .sdk.api import VersionedSDK
 from .server import valid_trace_id
 
@@ -101,7 +101,7 @@ def build_code_mode():
     sdk.open_session(client.token, client.role)
 
     def resolve_reference(session_id, reference):
-        parsed = parse_reference(reference)
+        parsed = parse_document_reference(reference)
         if parsed is None:
             return False
         return bool(sdk.call(session_id, "read", doc_id=parsed[0], version=parsed[1]))

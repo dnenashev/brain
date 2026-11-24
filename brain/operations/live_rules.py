@@ -7,21 +7,12 @@ from ..grounding import resolve_rule
 from ..impact import ImpactIndex
 from ..knowledge import KnowledgeRevision
 from ..knowledge_workflow import lint
+from ..navigation import document_reference, parse_document_reference
 
 
 class RuleValidationError(ValueError):
     def __init__(self, issues):
         self.issues = issues
-
-
-def parse_reference(ref):
-    if not isinstance(ref, str) or not ref.startswith("doc:"):
-        return None
-    doc_id, separator, version = ref[4:].rpartition("@")
-    if (not separator or not 1 <= len(doc_id) <= 128 or not version.isascii()
-            or not version.isdecimal() or not 1 <= len(version) <= 18 or version[0] == "0"):
-        return None
-    return doc_id, int(version)
 
 
 def _today():
@@ -45,7 +36,7 @@ def record_publication(store, actor, connection, change, version, author):
     try:
         card = KnowledgeRevision(
             knowledge_id=doc_id, revision=version, statement=change["text"],
-            source=metadata.get("source", f"doc:{doc_id}@{version}"), scope=project_id,
+            source=metadata.get("source", document_reference(doc_id, version)), scope=project_id,
             owner=author, status="active", effective_on=date.fromisoformat(metadata.get("effective_on", today.isoformat())),
             review_on=date.fromisoformat(metadata.get("review_on", (today + timedelta(days=90)).isoformat())),
             author=author, changed_by=subject,
@@ -68,7 +59,7 @@ def record_publication(store, actor, connection, change, version, author):
 
 
 def _read_ref(store, connection, actor, ref):
-    parsed = parse_reference(ref)
+    parsed = parse_document_reference(ref)
     if parsed is None:
         return None
     return store.read_in_transaction(
@@ -155,7 +146,7 @@ def enqueue_links(store, actor, connection, task_id, refs):
     for ref in refs:
         if _read_ref(store, connection, actor, ref) is None:
             raise RuleValidationError(["source_unavailable"])
-    return _record_links(connection, actor["project_id"], task_id, {parse_reference(ref)[0] for ref in refs})
+    return _record_links(connection, actor["project_id"], task_id, {parse_document_reference(ref)[0] for ref in refs})
 
 
 def record_checks(store, actor, task_id, rule_ids, deliveries):

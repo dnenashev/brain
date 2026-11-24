@@ -35,10 +35,10 @@ class AuditLog:
             if "project_id" not in columns:
                 connection.execute("ALTER TABLE audit_events ADD COLUMN project_id TEXT")
 
-        reader_uri = database.as_uri() + "?mode=ro"
+        self._reader_uri = database.as_uri() + "?mode=ro"
 
         def read_after(cursor=0, *, include_project=False):
-            with closing(sqlite3.connect(reader_uri, uri=True)) as connection:
+            with closing(sqlite3.connect(self._reader_uri, uri=True)) as connection:
                 connection.row_factory = sqlite3.Row
                 rows = connection.execute(
                     "SELECT seq, trace_id, step, outcome, timestamp, details, project_id "
@@ -52,6 +52,14 @@ class AuditLog:
             return events
 
         self.read_after = read_after
+
+    def sequence_has_gap(self):
+        with closing(sqlite3.connect(self._reader_uri, uri=True)) as connection:
+            count, final = connection.execute(
+                "SELECT COUNT(*), COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'audit_events'), 0) "
+                "FROM audit_events"
+            ).fetchone()
+        return count != final
 
     def append(self, *, trace_id, step, outcome, project_id=None, details: Mapping[str, object] | None = None):
         redacted = {}
