@@ -85,12 +85,13 @@ class ChangeSetStore(SQLiteKnowledgeStore):
             )
             return revision
 
-    def has_draft(self, project_id, draft_id, revision, *, actor):
+    def get_review_draft(self, project_id, draft_id, revision, *, actor):
         with self._lock, self._database() as connection:
-            return connection.execute(
-                "SELECT 1 FROM drafts WHERE project_id = ? AND draft_id = ? AND revision = ? AND author = ?",
+            draft = connection.execute(
+                "SELECT payload FROM drafts WHERE project_id = ? AND draft_id = ? AND revision = ? AND author = ?",
                 (project_id, draft_id, revision, actor),
-            ).fetchone() is not None
+            ).fetchone()
+            return json.loads(draft["payload"]) if draft is not None else None
 
     def publish_draft(self, project_id, draft_id, revision, *, actor, change_id,
                       authorize_publish, authorize_change, validate_batch):

@@ -135,7 +135,7 @@ class LiveAcceptance(unittest.TestCase):
             'draft = sdk_call("draft", draft_id="draft-timeout", change=change)\n'
             'check = sdk_call("check", deliveries=[{"check":"grounded","run":"seatbelt","outcome":"pass"}])\n'
             'assert check["acceptance"] == "pass"\n'
-            'handoff = {"goal":"Adjust synthetic timeout", "artifact":change["text"], '
+            'handoff = {"goal":"Adjust synthetic timeout", "artifact":"timeout adjustment", '
             '"verification":"Native Seatbelt live check", "boundary":"Local synthetic rule", '
             '"assignee":"agent", "constraints":["Synthetic"], "criteria":["Grounded"], '
             '"exceptions":[], "source":[{"rule_id": rule["doc_id"], "revision": rule["version"], "source": ref}]}\n'
@@ -168,6 +168,12 @@ class LiveAcceptance(unittest.TestCase):
         first = self.run_candidate(SHA1, "timeout candidate 400")
         retry = {"task_id": "timeout-review", "candidate_sha": SHA1, "handoff": first["handoff"], **first["draft"]}
         self.assertEqual(self.api("/reviews", token=self.agent, **retry)[0], 200)
+        self.assertEqual(self.api("/reviews", token=self.agent, **{**retry, "task_id": "duplicate-draft"})[0], 409)
+        status, card, _ = self.browser("GET", "/api/reviews/timeout-review", cookie=cookie)
+        self.assertEqual(status, 200)
+        change = json.loads(card)["changes"]
+        self.assertEqual(change["Артефакт"], "timeout adjustment")
+        self.assertEqual(change["Черновик"], "timeout candidate 400")
         self.assertIn("timeout-review", self.browser("GET", "/", cookie=cookie)[1])
         self.browser_decision(cookie, SHA1, "return", "", expected=400)
         self.browser_decision(cookie, SHA1, "return", "Set the agreed timeout.")

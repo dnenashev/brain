@@ -208,7 +208,8 @@ class LiveWorkflow:
         if not isinstance(sha, str) or not _SHA.fullmatch(sha):
             raise ValueError("Invalid candidate SHA")
         draft_id, revision = self._id(body, "draft_id"), self._revision(body)
-        if not self.changesets.has_draft(project_id, draft_id, revision, actor=subject):
+        draft = self.changesets.get_review_draft(project_id, draft_id, revision, actor=subject)
+        if draft is None:
             raise PermissionError("Candidate must reference the author's own draft")
         handoff = issue_handoff(body.get("handoff"))
         if handoff["outcome"] != "issued":
@@ -227,7 +228,12 @@ class LiveWorkflow:
             "project_id": project_id, "task_id": task_id, "candidate_sha": sha, "author": subject,
             "draft_id": draft_id, "revision": revision, "trace_id": trace_id, "status": "pending",
             "handoff": handoff["packet"], "brief": request["goal"],
-            "changes": [request["artifact"]], "risks": request["exceptions"], "sources": refs,
+            "changes": {
+                "Артефакт": request["artifact"], "Документ": draft["doc_id"],
+                "Базовая версия": draft["expected_version"], "Черновик": draft["text"],
+                "Читатели": draft["readers"], "Ссылки черновика": draft.get("sources", []),
+            },
+            "risks": request["exceptions"], "sources": refs,
             "tests": [request["verification"], *request["criteria"]],
             "rollback": request["boundary"],
         }

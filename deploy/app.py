@@ -82,6 +82,7 @@ class ReviewState:
                          if (card['project_id'], card['task_id']) == (project_id, task_id)), None)
 
     def enqueue(self, card):
+        started = monotonic()
         project_id, task_id, sha = (card[key] for key in ('project_id', 'task_id', 'candidate_sha'))
         with self.lock:
             queue = self.state['queue']
@@ -95,6 +96,7 @@ class ReviewState:
             if exact is not None:
                 fields = ('author', 'draft_id', 'revision', 'handoff')
                 if all(exact.get(field) == card[field] for field in fields):
+                    self._audit_enqueue(exact, started, 'duplicate')
                     return False
                 raise WorkflowError(409, 'candidate_payload_conflict')
             if queued is not None or (prior and prior[-1]['decision'] == 'approve'):
@@ -106,16 +108,29 @@ class ReviewState:
                 if card['revision'] <= previous['revision']:
                     raise WorkflowError(409, 'candidate_revision_conflict')
                 card = {**card, 'feedback': previous['feedback']}
+            used_draft = any(
+                (item.get('project_id'), item.get('draft_id'), item.get('revision'))
+                == (project_id, card['draft_id'], card['revision'])
+                for item in [*queue, *(record.get('card', {}) for record in self.state['decisions'])]
+            )
+            if used_draft:
+                raise WorkflowError(409, 'draft_revision_already_in_review')
             updated = {'queue': [*queue, card], 'decisions': self.state['decisions']}
             _write_json(self.path, updated)
             self.state = updated
+            self._audit_enqueue(card, started, 'ok')
             return True
+
+    def _audit_enqueue(self, card, started, outcome):
+        self.audit.append(trace_id=card['trace_id'], project_id=card['project_id'], step='review_enqueued',
+                          outcome=outcome, details={'duration_ms': (monotonic() - started) * 1000})
 
     def _ledger(self, project_id, task_id):
         ledger = ReviewLedger()
         previous = None
         for record in self.state['decisions']:
-            if (record['project_id'], record['task_id']) != (project_id, task_id):
+            if ((record['project_id'], record['task_id']) != (project_id, task_id)
+                    or 'draft_id' not in record.get('card', {})):
                 continue
             sha = record['candidate_sha']
             if record['decision'] == 'approve':
@@ -147,13 +162,14 @@ class ReviewState:
                 return False
             record = dict(project_id=project_id, task_id=task_id, candidate_sha=candidate_sha,
                           decision=decision, comment=comment, actor_id=actor_id)
-            ledger, previous = self._ledger(project_id, task_id)
-            if decision == 'return':
-                feedback = ledger.record_feedback(candidate_sha, task_id=task_id, candidate_sha=candidate_sha,
-                                                  text=comment, previous_id=previous).text
-            else:
-                ledger.approve(task_id, candidate_sha, operator=actor_id)
-                feedback = card.get('feedback')
+            feedback = comment if decision == 'return' else card.get('feedback')
+            if 'draft_id' in card:
+                ledger, previous = self._ledger(project_id, task_id)
+                if decision == 'return':
+                    feedback = ledger.record_feedback(candidate_sha, task_id=task_id, candidate_sha=candidate_sha,
+                                                      text=comment, previous_id=previous).text
+                else:
+                    ledger.approve(task_id, candidate_sha, operator=actor_id)
             record['card'] = {**card, 'status': 'changes_requested' if decision == 'return' else 'approved',
                               'feedback': feedback}
             updated = {'queue': [item for item in queue if item is not card],
@@ -181,7 +197,7 @@ class AuditedKnowledge(KnowledgeService):
             '/check': 'check', '/reviews': 'review_enqueued', '/publish': 'publish',
             '/compensate': 'compensate',
         }
-        if actor is not None and method == 'POST' and path in steps:
+        if actor is not None and method == 'POST' and path in steps and (path != '/reviews' or status >= 400):
             outcome = 'ok' if status < 400 else 'failed'
             if status == 403:
                 outcome = 'policy_denied'
