@@ -40,7 +40,7 @@ def load_config(path):
     directives = config.get("directives", {})
     if not isinstance(directives, dict) or any(
         not isinstance(levels, dict) or any(
-            level not in {"root", "organization", "project", "workflow"}
+            level not in {"organization", "project", "workflow"}
             or not isinstance(scope, str) or not scope
             for level, scope in levels.items()
         )

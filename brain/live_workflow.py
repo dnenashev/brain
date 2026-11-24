@@ -68,14 +68,13 @@ class LiveWorkflow:
         project_id = actor["project_id"]
         configured = self.directives.get(project_id, {})
         directives = [
-            {"level": level, "ref": "policy:" + name, "value": configured.get(name, project_id)}
+            {"level": level, "ref": "policy:" + name, "value": project_id if level == 1 else configured.get(name, project_id)}
             for level, name in enumerate(_CONTEXT_LEVELS, 1)
         ]
-        if "instruction_scope" in body:
-            scope = body["instruction_scope"]
-            if not isinstance(scope, str) or not scope:
-                raise ValueError("Invalid requested instruction scope")
-            directives.append({"level": 5, "ref": "request:scope", "value": scope})
+        scope = body.get("instruction_scope", project_id)
+        if not isinstance(scope, str) or not scope:
+            raise ValueError("Invalid requested instruction scope")
+        directives.append({"level": 5, "ref": "request:scope", "value": scope})
         outcome = resolve_directives(
             directives, audit=lambda _: self.audit.append(
                 trace_id=trace_id, project_id=project_id, step="directives", outcome="needs_clarification"
@@ -164,8 +163,11 @@ class LiveWorkflow:
         if path == "/reviews":
             return self._enqueue(actor, body, trace_id)
         if path == "/compensate":
+            change_id = body.get("change_id")
+            if not isinstance(change_id, str):
+                raise ValueError("Invalid change_id")
             return 200, self.changesets.compensate(
-                self._id(body, "change_id"), compensation_id=self._id(body, "compensation_id"),
+                change_id, compensation_id=self._id(body, "compensation_id"),
                 actor=actor["actor_id"], project_id=actor["project_id"], authorize_change=self._access(actor, restore=True),
             )
         return 200, self._publish(actor, token, body, approvals)
