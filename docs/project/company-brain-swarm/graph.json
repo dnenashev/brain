@@ -1,0 +1,408 @@
+{
+  "schema": 1,
+  "source": "../company-brain-build-checklist.md",
+  "tasks": [
+    {
+      "id": "CB11",
+      "after": [
+        "O01",
+        "O02",
+        "O03",
+        "O04"
+      ],
+      "paths": [
+        "docs/core.md",
+        "docs/processes/development.md"
+      ]
+    },
+    {
+      "id": "CB12",
+      "after": [
+        "CB11"
+      ],
+      "paths": [
+        "specs/contracts/**"
+      ]
+    },
+    {
+      "id": "CB13",
+      "after": [
+        "CB12"
+      ],
+      "paths": [
+        "specs/behavior/**",
+        "docs/current/**",
+        "docs/adr/0001-pilot.md"
+      ]
+    },
+    {
+      "id": "CB21",
+      "after": [
+        "CB13"
+      ],
+      "paths": [
+        "brain/knowledge.py"
+      ]
+    },
+    {
+      "id": "CB22",
+      "after": [
+        "CB21"
+      ],
+      "paths": [
+        "brain/git_store.py",
+        "docs/memory-layout.md"
+      ]
+    },
+    {
+      "id": "CB23",
+      "after": [
+        "CB22"
+      ],
+      "paths": [
+        "brain/navigation.py"
+      ]
+    },
+    {
+      "id": "CB24",
+      "after": [
+        "CB22"
+      ],
+      "paths": [
+        "brain/knowledge_workflow.py"
+      ]
+    },
+    {
+      "id": "CB25",
+      "after": [
+        "CB23",
+        "CB24"
+      ],
+      "paths": [
+        "brain/grounding.py"
+      ]
+    },
+    {
+      "id": "CB31",
+      "after": [
+        "CB25"
+      ],
+      "paths": [
+        "brain/handoff.py"
+      ]
+    },
+    {
+      "id": "CB32",
+      "after": [
+        "CB31"
+      ],
+      "paths": [
+        "brain/review.py"
+      ]
+    },
+    {
+      "id": "CB33",
+      "after": [
+        "CB31",
+        "CB25"
+      ],
+      "paths": [
+        "brain/impact.py"
+      ]
+    },
+    {
+      "id": "CB34",
+      "after": [
+        "CB32",
+        "CB33"
+      ],
+      "paths": [
+        "brain/adapters/swarm.py"
+      ]
+    },
+    {
+      "id": "CB41",
+      "after": [
+        "CB32"
+      ],
+      "paths": [
+        "brain/policy.py"
+      ]
+    },
+    {
+      "id": "CB42",
+      "after": [
+        "CB41",
+        "CB25"
+      ],
+      "paths": [
+        "brain/instructions.py"
+      ]
+    },
+    {
+      "id": "CB43",
+      "after": [
+        "CB41"
+      ],
+      "paths": [
+        "brain/adapters/sources.py",
+        "brain/adapters/secret_broker.py"
+      ]
+    },
+    {
+      "id": "CB61",
+      "after": [
+        "O54",
+        "CB25"
+      ],
+      "paths": [
+        "brain/storage/sqlite_store.py",
+        "brain/storage/migrations/001.sql"
+      ]
+    },
+    {
+      "id": "CB62",
+      "after": [
+        "CB61"
+      ],
+      "paths": [
+        "brain/storage/changesets.py",
+        "brain/storage/migrations/002.sql"
+      ]
+    },
+    {
+      "id": "CB63",
+      "after": [
+        "CB62",
+        "CB22"
+      ],
+      "paths": [
+        "brain/storage/import_git.py"
+      ]
+    },
+    {
+      "id": "CB64",
+      "after": [
+        "CB63",
+        "CB42",
+        "CB43"
+      ],
+      "paths": [
+        "brain/server.py",
+        "brain/session.py"
+      ]
+    },
+    {
+      "id": "CB71",
+      "after": [
+        "CB64",
+        "CB33",
+        "CB34"
+      ],
+      "paths": [
+        "brain/sdk/**",
+        "docs/sdk.md"
+      ]
+    },
+    {
+      "id": "CB72",
+      "after": [
+        "CB71"
+      ],
+      "paths": [
+        "brain/sandbox/**"
+      ]
+    },
+    {
+      "id": "CB73",
+      "after": [
+        "CB71",
+        "CB72",
+        "CB34"
+      ],
+      "paths": [
+        "brain/adapters/mcp.py",
+        "brain/cli.py",
+        "brain/adapters/swarm_mcp.py"
+      ]
+    },
+    {
+      "id": "CB74",
+      "after": [
+        "CB64",
+        "CB32"
+      ],
+      "paths": [
+        "brain/web/**",
+        "brain/web_api.py"
+      ]
+    },
+    {
+      "id": "CB75",
+      "after": [
+        "CB73",
+        "CB74",
+        "CB43"
+      ],
+      "paths": [
+        "brain/observer.py",
+        "brain/audit.py"
+      ]
+    },
+    {
+      "id": "CB81",
+      "after": [
+        "CB75"
+      ],
+      "paths": [
+        "deploy/**",
+        "docs/operations/deploy.md"
+      ]
+    },
+    {
+      "id": "CB82",
+      "after": [
+        "CB81",
+        "CB62"
+      ],
+      "paths": [
+        "brain/operations/recovery.py",
+        "docs/operations/recovery.md"
+      ]
+    },
+    {
+      "id": "CB83",
+      "after": [
+        "CB81",
+        "CB75"
+      ],
+      "paths": [
+        "brain/operations/telemetry.py",
+        "docs/operations/oncall.md"
+      ]
+    },
+    {
+      "id": "CB84",
+      "after": [
+        "CB82",
+        "CB24"
+      ],
+      "paths": [
+        "brain/operations/hygiene.py",
+        "docs/operations/maintenance.md"
+      ]
+    },
+    {
+      "id": "CB85",
+      "after": [
+        "CB82",
+        "CB83",
+        "CB84"
+      ],
+      "paths": [
+        "release/**",
+        "docs/operations/release.md"
+      ]
+    }
+  ],
+  "operator_gates": [
+    {
+      "id": "O01",
+      "after": []
+    },
+    {
+      "id": "O02",
+      "after": []
+    },
+    {
+      "id": "O03",
+      "after": []
+    },
+    {
+      "id": "O04",
+      "after": [
+        "O02",
+        "O03"
+      ]
+    },
+    {
+      "id": "O41",
+      "after": [
+        "CB41",
+        "CB42",
+        "CB43",
+        "CB34"
+      ]
+    },
+    {
+      "id": "O51",
+      "after": [
+        "O02"
+      ]
+    },
+    {
+      "id": "O52",
+      "after": [
+        "O51",
+        "O41",
+        "CB34"
+      ]
+    },
+    {
+      "id": "O53",
+      "after": [
+        "O52"
+      ]
+    },
+    {
+      "id": "O54",
+      "after": [
+        "O53"
+      ]
+    },
+    {
+      "id": "O91",
+      "after": [
+        "CB85",
+        "O54",
+        "O41"
+      ]
+    },
+    {
+      "id": "O92",
+      "after": [
+        "O91"
+      ]
+    },
+    {
+      "id": "O93",
+      "after": [
+        "O92"
+      ]
+    },
+    {
+      "id": "O94",
+      "after": [
+        "O93"
+      ]
+    },
+    {
+      "id": "O101",
+      "after": [
+        "O94"
+      ]
+    },
+    {
+      "id": "O102",
+      "after": [
+        "O101"
+      ]
+    },
+    {
+      "id": "O103",
+      "after": [
+        "O102"
+      ]
+    }
+  ]
+}
