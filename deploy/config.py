@@ -7,6 +7,7 @@ import re
 import stat
 from pathlib import Path
 
+from brain.directive_files import DirectiveFiles
 from brain.live_workflow import DEFAULT_LIMITS
 
 
@@ -47,6 +48,7 @@ def load_config(path):
         for levels in directives.values()
     ):
         raise ValueError("invalid deployment directive scope")
+    config["directive_files"] = DirectiveFiles(path.parent, config.get("directive_files", {}))
     load_credentials(config["credential_file"])
     return config
 

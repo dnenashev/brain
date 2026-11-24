@@ -60,8 +60,13 @@ class ChangeSetStore(SQLiteKnowledgeStore):
                 "UPDATE review_decisions SET compensated_by = ? WHERE project_id = ? AND published_change_id = ?",
                 (compensation_id, original["project_id"], change_id),
             )
+            for doc_id, version in versions.items():
+                connection.execute(
+                    "UPDATE knowledge_cards SET status = 'superseded', changed_by = ? WHERE scope = ? "
+                    "AND knowledge_id = ? AND revision = ? AND status = 'active'",
+                    (actor, original["project_id"], doc_id, version),
+                )
             return receipt
-
 
     def save_draft(self, project_id, draft_id, actor, change, *, authorize_change, validate_batch, max_drafts):
         with self._lock, self._database() as connection, connection:

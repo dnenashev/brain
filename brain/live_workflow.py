@@ -4,10 +4,13 @@ import re
 from datetime import datetime, timezone
 
 from . import policy
+from .directive_files import LEVELS
 from .handoff import issue_handoff
 from .instructions import resolve_directives
 from .observer import Observer
+from .operations import live_rules
 from .operations.hygiene import lint_before_write
+from .operations.live_rules import parse_reference
 from .operations.telemetry import summarize, summarize_check_results
 from .storage.changesets import DraftConflict
 from .write_access import check_write_access
@@ -16,6 +19,8 @@ from .write_access import check_write_access
 ACTIONS = {
     "/identity": "read",
     "/check": "read",
+    "/resolve": "read",
+    "/impact": "read",
     "/drafts": "write",
     "/reviews": "write",
     "/compensate": "write",
@@ -24,9 +29,7 @@ ACTIONS = {
 }
 _OPERATOR_ONLY = {"/compensate", "/publish", "/ops/audit-summary"}
 DEFAULT_LIMITS = {"document_bytes": 65536, "active_documents": 1000, "versions": 10000, "drafts": 1000}
-_CONTEXT_LEVELS = ("root", "organization", "project", "workflow")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
-_REF = re.compile(r"doc:(.{1,128})@([1-9][0-9]{0,17})")
 _SHA = re.compile(r"[0-9a-f]{40}")
 
 
@@ -34,11 +37,6 @@ class WorkflowError(ValueError):
     def __init__(self, status, error, **details):
         self.status = status
         self.response = {"error": error, **details}
-
-
-def parse_reference(ref):
-    match = _REF.fullmatch(ref) if isinstance(ref, str) else None
-    return (match[1], int(match[2])) if match else None
 
 
 def validate_change(change):
@@ -55,7 +53,7 @@ def validate_change(change):
 
 
 class LiveWorkflow:
-    def __init__(self, store, changesets, reviews, audit, subjects, *, limits=None, directives=None):
+    def __init__(self, store, changesets, reviews, audit, subjects, *, limits=None, directives=None, directive_files=None):
         self.store = store
         self.changesets = changesets
         self.reviews = reviews
@@ -63,25 +61,36 @@ class LiveWorkflow:
         self.subjects = subjects
         self.limits = {**DEFAULT_LIMITS, **(limits or {})}
         self.directives = directives or {}
+        self.directive_files = directive_files
 
     def check_directives(self, actor, body, trace_id):
         project_id = actor["project_id"]
         configured = self.directives.get(project_id, {})
-        directives = [
-            {"level": level, "ref": "policy:" + name, "value": project_id if level == 1 else configured.get(name, project_id)}
-            for level, name in enumerate(_CONTEXT_LEVELS, 1)
-        ]
+        directives = [{"level": 1, "ref": "policy:root", "value": project_id}]
+        for level, name in enumerate(LEVELS, 1):
+            if name in configured:
+                directives.append({"level": level, "ref": "policy:" + name, "value": configured[name]})
+            if self.directive_files is not None:
+                try:
+                    scope = self.directive_files.scope(name)
+                except (OSError, ValueError):
+                    self._audit_clarification(project_id, trace_id)
+                    raise WorkflowError(422, "directive_source_unavailable",
+                                        outcome="OUTCOME_NONE_CLARIFICATION", level=level) from None
+                if scope is not None:
+                    directives.append({"level": level, "ref": "policy-file:" + name, "value": scope})
         scope = body.get("instruction_scope", project_id)
         if not isinstance(scope, str) or not scope:
             raise ValueError("Invalid requested instruction scope")
         directives.append({"level": 5, "ref": "request:scope", "value": scope})
         outcome = resolve_directives(
-            directives, audit=lambda _: self.audit.append(
-                trace_id=trace_id, project_id=project_id, step="directives", outcome="needs_clarification"
-            ),
+            directives, audit=lambda _: self._audit_clarification(project_id, trace_id),
         )
         if outcome["outcome"] == "OUTCOME_NONE_CLARIFICATION":
             raise WorkflowError(422, "directive_conflict", **outcome)
+
+    def _audit_clarification(self, project_id, trace_id):
+        self.audit.append(trace_id=trace_id, project_id=project_id, step="directives", outcome="needs_clarification")
 
     def _access(self, actor, *, approved=False, restore=False, stage=False):
         subject = actor["actor_id"]
@@ -148,16 +157,12 @@ class LiveWorkflow:
             return 200, {key: actor[key] for key in ("actor_id", "project_id", "role")}
         if path == "/ops/audit-summary":
             return 200, self._audit_summary(actor, body.get("trace_id", trace_id))
+        if path == "/resolve":
+            return 200, live_rules.resolve(self.store, self.audit, actor, self._rule_id(body.get("rule_id")), trace_id)
+        if path == "/impact":
+            return 200, self._impact(actor, body)
         if path == "/check":
-            deliveries = body.get("deliveries")
-            if not isinstance(deliveries, list) or any(
-                not isinstance(item, dict)
-                or any(not isinstance(item.get(key), str) or not item[key] for key in ("check", "run"))
-                or item.get("outcome") not in ("pass", "fail")
-                for item in deliveries
-            ):
-                raise ValueError("Invalid check deliveries")
-            return 200, summarize_check_results(deliveries)
+            return 200, self._check(actor, body)
         if path == "/drafts":
             return 201, self._draft(actor, body)
         if path == "/reviews":
@@ -171,6 +176,56 @@ class LiveWorkflow:
                 actor=actor["actor_id"], project_id=actor["project_id"], authorize_change=self._access(actor, restore=True),
             )
         return 200, self._publish(actor, token, body, approvals)
+
+    def _check(self, actor, body):
+        deliveries = body.get("deliveries")
+        if not isinstance(deliveries, list) or any(
+            not isinstance(item, dict)
+            or any(not isinstance(item.get(key), str) or not item[key] for key in ("check", "run"))
+            or item.get("outcome") not in ("pass", "fail")
+            or ("result_id" in item and not isinstance(item["result_id"], str))
+            for item in deliveries
+        ):
+            raise ValueError("Invalid check deliveries")
+        if "task_id" in body or "rule_ids" in body:
+            task_id = self._id(body, "task_id")
+            rule_ids = body.get("rule_ids")
+            if not isinstance(rule_ids, list) or not rule_ids:
+                raise ValueError("Missing impact rules")
+            live_rules.record_checks(self.store, actor, task_id,
+                                     {self._rule_id(rule_id) for rule_id in rule_ids}, deliveries)
+        return summarize_check_results(deliveries)
+
+    @staticmethod
+    def _rule_id(rule_id):
+        if not isinstance(rule_id, str) or not 1 <= len(rule_id) <= 128:
+            raise ValueError("Invalid rule ID")
+        return rule_id
+
+    def _impact(self, actor, body):
+        rule_id = body.get("rule_id")
+        kind = body.get("kind")
+        identifier = body.get("identifier")
+        if rule_id is not None:
+            self._rule_id(rule_id)
+        if kind is not None or identifier is not None:
+            if kind not in ("task", "check", "run", "result") or not isinstance(identifier, str) or not identifier:
+                raise ValueError("Invalid impact lookup")
+        index, _ = live_rules.impact_index(self.store, actor)
+        return {
+            "affected": index.affected(rule_id) if rule_id is not None else None,
+            "rules_for": index.rules_for(kind, identifier) if kind is not None else [],
+            "uncovered_rules": index.uncovered_rules(),
+        }
+
+    def enrich_review(self, actor, card):
+        index, visible = live_rules.impact_index(self.store, actor)
+        rule_ids = set(card.get("impact", {}).get("rule_ids", ())) & visible
+        uncovered = set(index.uncovered_rules())
+        return {**card, "impact": {
+            "affected": {rule_id: index.affected(rule_id) for rule_id in sorted(rule_ids)},
+            "uncovered_rules": sorted(rule_ids & uncovered),
+        }}
 
     @staticmethod
     def _id(body, field):
@@ -232,12 +287,15 @@ class LiveWorkflow:
                 "Артефакт": request["artifact"], "Документ": draft["doc_id"],
                 "Базовая версия": draft["expected_version"], "Черновик": draft["text"],
                 "Читатели": draft["readers"], "Ссылки черновика": draft.get("sources", []),
+                "Метаданные правила": draft.get("rule", {}),
             },
             "risks": request["exceptions"], "sources": refs,
             "tests": [request["verification"], *request["criteria"]],
             "rollback": request["boundary"],
         }
-        created = self.reviews.enqueue(card)
+        created = self.reviews.enqueue(
+            card, record_links=lambda connection: live_rules.enqueue_links(self.store, actor, connection, task_id, refs),
+        )
         return (201 if created else 200), {"task_id": task_id, "candidate_sha": sha}
 
     def _publish(self, actor, token, body, approvals):
@@ -259,6 +317,9 @@ class LiveWorkflow:
             authorize_publish=lambda current: policy.authorize(actor, request, current_revision=current, approval=approval),
             authorize_change=self._access(actor, approved=True), validate_batch=self._validate_batch(actor),
             review=(task_id, sha),
+            record_rule=lambda connection, change, version, author: live_rules.record_publication(
+                self.store, actor, connection, change, version, author,
+            ),
         )
 
     def _audit_summary(self, actor, trace_id):

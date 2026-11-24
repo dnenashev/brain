@@ -6,9 +6,9 @@ from typing import Any
 
 
 _ROLE_OPERATIONS = {
-    "reader": frozenset({"read", "search", "check"}),
-    "writer": frozenset({"read", "search", "check", "draft"}),
-    "operator": frozenset({"read", "search", "check", "draft", "task"}),
+    "reader": frozenset({"read", "search", "check", "resolve_rule"}),
+    "writer": frozenset({"read", "search", "check", "resolve_rule", "draft"}),
+    "operator": frozenset({"read", "search", "check", "resolve_rule", "draft", "task"}),
 }
 
 

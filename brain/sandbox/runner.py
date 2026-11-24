@@ -5,7 +5,7 @@ from functools import partial
 from typing import Any
 
 
-_OPERATIONS = frozenset({"read", "search", "check", "draft", "task"})
+_OPERATIONS = frozenset({"read", "search", "check", "resolve_rule", "draft", "task"})
 
 
 def dispatch_sdk_request(sdk: Any, session_id: str, request: Any) -> dict[str, Any]:

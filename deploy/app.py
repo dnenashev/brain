@@ -72,7 +72,7 @@ class AuditedKnowledge(KnowledgeService):
         status, result = super().dispatch(method, path, token=token, body=body, trace_id=trace_id)
         steps = {
             '/read': 'read', '/search': 'search', '/write': 'write', '/drafts': 'draft',
-            '/check': 'check', '/reviews': 'review_enqueued', '/publish': 'publish',
+            '/check': 'check', '/resolve': 'resolve', '/reviews': 'review_enqueued', '/publish': 'publish',
             '/compensate': 'compensate',
         }
         if actor is not None and method == 'POST' and path in steps and (path != '/reviews' or status >= 400):
@@ -126,7 +126,8 @@ def run(config):
         changesets = cleanup.enter_context(ChangeSetStore(database))
         state = ReviewState(store, data_dir / 'review.json', lambda: _seed_queue(config['review_seed']), audit)
         workflow = LiveWorkflow(store, changesets, state, audit, project_subjects,
-                                limits=config.get('limits'), directives=config.get('directives'))
+                                limits=config.get('limits'), directives=config.get('directives'),
+                                directive_files=config.get('directive_files'))
         knowledge = AuditedKnowledge(
             store, changesets, sessions, audit, project_subjects=project_subjects, workflow=workflow,
         )

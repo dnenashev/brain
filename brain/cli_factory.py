@@ -73,6 +73,13 @@ class LocalKnowledgeClient:
                 raise ValueError("Knowledge trace did not match")
             return json.load(response)
 
+    def resolve_rule(self, rule_id):
+        return self.call("/resolve", rule_id=rule_id)
+
+    def check(self, deliveries, task_id=None, rule_ids=None):
+        impact = {"task_id": task_id, "rule_ids": rule_ids} if task_id is not None or rule_ids is not None else {}
+        return self.call("/check", deliveries=deliveries, **impact)
+
     def call(self, path, **payload):
         return self.request(path, project_id=self.project, **payload)
 
@@ -83,7 +90,8 @@ def build_code_mode():
     sdk.register("knowledge-http-v1", {
         "read": lambda doc_id, version=None: client.call("/read", doc_id=doc_id, version=version),
         "search": lambda query: client.call("/search", query=query)["results"],
-        "check": lambda deliveries: client.call("/check", deliveries=deliveries),
+        "check": client.check,
+        "resolve_rule": client.resolve_rule,
         "draft": lambda draft_id, change: client.call("/drafts", draft_id=draft_id, change=change),
         "task": lambda task_id, candidate_sha, draft_id, revision, handoff: client.call(
             "/reviews", task_id=task_id, candidate_sha=candidate_sha,
