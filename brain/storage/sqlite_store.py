@@ -138,34 +138,60 @@ class SQLiteKnowledgeStore:
 
     def read(self, project_id, doc_id, *, subject, version=None):
         with self._lock, self._database() as connection:
-            row = connection.execute(
-                """
-                WITH latest AS (
-                    SELECT id, version FROM document_revisions
-                    WHERE project_id = :project_id AND doc_id = :doc_id
-                    ORDER BY version DESC LIMIT 1
-                )
-                SELECT revision.doc_id, revision.version, revision.text
-                FROM latest
-                JOIN revision_readers AS current_reader
-                    ON current_reader.revision_id = latest.id
-                    AND current_reader.subject = :subject
-                JOIN document_revisions AS revision
-                    ON revision.project_id = :project_id
-                    AND revision.doc_id = :doc_id
-                    AND revision.version = COALESCE(:version, latest.version)
-                JOIN revision_readers AS requested_reader
-                    ON requested_reader.revision_id = revision.id
-                    AND requested_reader.subject = :subject
-                """,
-                {
-                    "project_id": project_id,
-                    "doc_id": doc_id,
-                    "subject": subject,
-                    "version": version,
-                },
-            ).fetchone()
+            return self.read_in_transaction(connection, project_id, doc_id, subject=subject, version=version)
+
+    @staticmethod
+    def read_in_transaction(connection, project_id, doc_id, *, subject, version=None):
+        row = connection.execute(
+            """
+            WITH latest AS (
+                SELECT id, version FROM document_revisions
+                WHERE project_id = :project_id AND doc_id = :doc_id
+                ORDER BY version DESC LIMIT 1
+            )
+            SELECT revision.doc_id, revision.version, revision.text
+            FROM latest
+            JOIN revision_readers AS current_reader
+                ON current_reader.revision_id = latest.id
+                AND current_reader.subject = :subject
+            JOIN document_revisions AS revision
+                ON revision.project_id = :project_id
+                AND revision.doc_id = :doc_id
+                AND revision.version = COALESCE(:version, latest.version)
+            JOIN revision_readers AS requested_reader
+                ON requested_reader.revision_id = revision.id
+                AND requested_reader.subject = :subject
+            """,
+            {
+                "project_id": project_id,
+                "doc_id": doc_id,
+                "subject": subject,
+                "version": version,
+            },
+        ).fetchone()
         return dict(row) if row is not None else None
+
+    def project_usage(self, project_id):
+        with self._lock, self._database() as connection:
+            return self.usage_in_transaction(connection, project_id)
+
+    @staticmethod
+    def usage_in_transaction(connection, project_id):
+        row = connection.execute(
+            """
+            SELECT COUNT(revisions.id) AS versions,
+                COUNT(CASE WHEN EXISTS (
+                    SELECT 1 FROM revision_readers WHERE revision_id = revisions.id
+                ) AND revisions.version = (
+                    SELECT MAX(latest.version) FROM document_revisions AS latest
+                    WHERE latest.project_id = revisions.project_id AND latest.doc_id = revisions.doc_id
+                ) THEN 1 END) AS active,
+                COALESCE(SUM(LENGTH(CAST(revisions.text AS BLOB))), 0) AS used_bytes
+            FROM document_revisions AS revisions WHERE project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        return dict(row)
 
     def snapshot(self, project_id, *, subject):
         with self._lock, self._database() as connection:

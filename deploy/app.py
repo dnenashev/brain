@@ -11,6 +11,8 @@ from time import monotonic
 from uuid import uuid4
 
 from brain.audit import AuditLog
+from brain.live_workflow import LiveWorkflow, WorkflowError
+from brain.review import ReviewLedger
 from brain.server import KnowledgeService, make_http_server
 from brain.session import SessionRegistry
 from brain.storage.changesets import ChangeSetStore
@@ -75,9 +77,66 @@ class ReviewState:
 
     def get_review(self, project_id, task_id):
         with self.lock:
-            decided = [record['card'] for record in self.state['decisions'] if 'card' in record]
+            decided = [record['card'] for record in reversed(self.state['decisions']) if 'card' in record]
             return next((card for card in self.state['queue'] + decided
                          if (card['project_id'], card['task_id']) == (project_id, task_id)), None)
+
+    def enqueue(self, card):
+        project_id, task_id, sha = (card[key] for key in ('project_id', 'task_id', 'candidate_sha'))
+        with self.lock:
+            queue = self.state['queue']
+            prior = [record for record in self.state['decisions']
+                     if (record['project_id'], record['task_id']) == (project_id, task_id)]
+            queued = next((item for item in queue if
+                           (item['project_id'], item['task_id']) == (project_id, task_id)), None)
+            exact = next((record.get('card') for record in prior if record['candidate_sha'] == sha), None)
+            if queued is not None and queued['candidate_sha'] == sha:
+                exact = queued
+            if exact is not None:
+                fields = ('author', 'draft_id', 'revision', 'handoff')
+                if all(exact.get(field) == card[field] for field in fields):
+                    return False
+                raise WorkflowError(409, 'candidate_payload_conflict')
+            if queued is not None or (prior and prior[-1]['decision'] == 'approve'):
+                raise WorkflowError(409, 'task_in_review_or_approved')
+            if prior:
+                previous = prior[-1]['card']
+                if previous.get('author') != card['author'] or previous.get('draft_id') != card['draft_id']:
+                    raise WorkflowError(409, 'candidate_owner_conflict')
+                if card['revision'] <= previous['revision']:
+                    raise WorkflowError(409, 'candidate_revision_conflict')
+                card = {**card, 'feedback': previous['feedback']}
+            updated = {'queue': [*queue, card], 'decisions': self.state['decisions']}
+            _write_json(self.path, updated)
+            self.state = updated
+            return True
+
+    def _ledger(self, project_id, task_id):
+        ledger = ReviewLedger()
+        previous = None
+        for record in self.state['decisions']:
+            if (record['project_id'], record['task_id']) != (project_id, task_id):
+                continue
+            sha = record['candidate_sha']
+            if record['decision'] == 'approve':
+                ledger.approve(task_id, sha, operator=record['actor_id'])
+            else:
+                ledger.record_feedback(sha, task_id=task_id, candidate_sha=sha,
+                                       text=record['comment'], previous_id=previous)
+                previous = sha
+        return ledger, previous
+
+    def is_approved(self, project_id, task_id, sha, draft_id, revision):
+        with self.lock:
+            ledger, _ = self._ledger(project_id, task_id)
+            if not ledger.is_approved(task_id, sha):
+                return False
+            return any(
+                (item['project_id'], item['task_id'], item['candidate_sha'], item['decision'],
+                 item.get('card', {}).get('draft_id'), item.get('card', {}).get('revision'))
+                == (project_id, task_id, sha, 'approve', draft_id, revision)
+                for item in self.state['decisions']
+            )
 
     def record_decision(self, project_id, task_id, candidate_sha, decision, comment, actor_id):
         started = monotonic()
@@ -88,12 +147,20 @@ class ReviewState:
                 return False
             record = dict(project_id=project_id, task_id=task_id, candidate_sha=candidate_sha,
                           decision=decision, comment=comment, actor_id=actor_id)
-            record['card'] = {**card, 'status': 'changes_requested' if decision == 'return' else 'approved'}
+            ledger, previous = self._ledger(project_id, task_id)
+            if decision == 'return':
+                feedback = ledger.record_feedback(candidate_sha, task_id=task_id, candidate_sha=candidate_sha,
+                                                  text=comment, previous_id=previous).text
+            else:
+                ledger.approve(task_id, candidate_sha, operator=actor_id)
+                feedback = card.get('feedback')
+            record['card'] = {**card, 'status': 'changes_requested' if decision == 'return' else 'approved',
+                              'feedback': feedback}
             updated = {'queue': [item for item in queue if item is not card],
                        'decisions': [*self.state['decisions'], record]}
             _write_json(self.path, updated)
             self.state = updated
-            self.audit.append(trace_id=task_id, step='decision',
+            self.audit.append(trace_id=card.get('trace_id', task_id), project_id=project_id, step='decision',
                               outcome='returned' if decision == 'return' else 'approved',
                               details={'duration_ms': (monotonic() - started) * 1000})
             return True
@@ -104,14 +171,22 @@ class AuditedKnowledge(KnowledgeService):
         super().__init__(store, changesets, sessions, **options)
         self.audit = audit
 
-    def dispatch(self, method, path, *, token=None, body=None):
+    def dispatch(self, method, path, *, token=None, body=None, trace_id=None):
+        trace_id = trace_id or uuid4().hex
         started = monotonic()
-        status, result = super().dispatch(method, path, token=token, body=body)
-        if method == 'POST' and path in ('/read', '/search', '/write'):
-            outcome = 'ok' if status < 400 else 'error'
-            self.audit.append(trace_id=uuid4().hex, step=path[1:],
-                              outcome='policy_denied' if status == 403 else outcome,
-                              details={'duration_ms': (monotonic() - started) * 1000})
+        actor = self._sessions.resolve(token)
+        status, result = super().dispatch(method, path, token=token, body=body, trace_id=trace_id)
+        steps = {
+            '/read': 'read', '/search': 'search', '/write': 'write', '/drafts': 'draft',
+            '/check': 'check', '/reviews': 'review_enqueued', '/publish': 'publish',
+            '/compensate': 'compensate',
+        }
+        if actor is not None and method == 'POST' and path in steps:
+            outcome = 'ok' if status < 400 else 'failed'
+            if status == 403:
+                outcome = 'policy_denied'
+            self.audit.append(trace_id=trace_id, project_id=actor['project_id'], step=steps[path],
+                              outcome=outcome, details={'duration_ms': (monotonic() - started) * 1000})
         return status, result
 
 
@@ -153,12 +228,15 @@ def run(config):
         project_subjects = {}
         for _, identity in records:
             project_subjects.setdefault(identity['project_id'], set()).add(identity['actor_id'])
+        store = cleanup.enter_context(SQLiteKnowledgeStore(database))
+        changesets = cleanup.enter_context(ChangeSetStore(database))
+        state = ReviewState(data_dir / 'review.json', config['review_seed'], audit)
+        workflow = LiveWorkflow(store, changesets, state, audit, project_subjects,
+                                limits=config.get('limits'), directives=config.get('directives'))
         knowledge = AuditedKnowledge(
-            SQLiteKnowledgeStore(database), ChangeSetStore(database), sessions, audit,
-            project_subjects=project_subjects,
+            store, changesets, sessions, audit, project_subjects=project_subjects, workflow=workflow,
         )
         cleanup.callback(knowledge.close)
-        state = ReviewState(data_dir / 'review.json', config['review_seed'], audit)
         web = ReviewWeb(sessions, list_reviews=state.list_reviews, get_review=state.get_review,
                         record_decision=state.record_decision)
         bind = config['bind']

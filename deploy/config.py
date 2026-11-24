@@ -7,6 +7,8 @@ import re
 import stat
 from pathlib import Path
 
+from brain.live_workflow import DEFAULT_LIMITS
+
 
 def load_config(path):
     path = Path(path).resolve()
@@ -29,6 +31,22 @@ def load_config(path):
             raise ValueError(f"{key} must be a nonempty path")
         target = path.parent / value
         config[key] = target.parent.resolve() / target.name if key == "credential_file" else target.resolve()
+    limits = config.get("limits", {})
+    if not isinstance(limits, dict) or any(
+        key not in DEFAULT_LIMITS or type(value) is not int or not 0 < value <= DEFAULT_LIMITS[key]
+        for key, value in limits.items()
+    ):
+        raise ValueError("invalid knowledge quotas")
+    directives = config.get("directives", {})
+    if not isinstance(directives, dict) or any(
+        not isinstance(levels, dict) or any(
+            level not in {"root", "organization", "project", "workflow"}
+            or not isinstance(scope, str) or not scope
+            for level, scope in levels.items()
+        )
+        for levels in directives.values()
+    ):
+        raise ValueError("invalid deployment directive scope")
     load_credentials(config["credential_file"])
     return config
 

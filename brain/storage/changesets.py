@@ -3,24 +3,39 @@ import json
 from .sqlite_store import SQLiteKnowledgeStore, put_revision_in_transaction
 
 
+class DraftConflict(ValueError):
+    pass
+
+
 class ChangeSetStore(SQLiteKnowledgeStore):
-    def apply(self, change_id, project_id, actor, changes, *, authorize_change=None):
+    def apply(self, change_id, project_id, actor, changes, *, authorize_change=None, validate_batch=None):
         with self._lock, self._database() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             return self._record_changeset(
                 connection, change_id, project_id, actor, changes, compensates=None,
-                authorize_change=authorize_change,
+                authorize_change=authorize_change, validate_batch=validate_batch,
             )
 
-    def compensate(self, change_id, *, compensation_id, actor):
+    def compensate(self, change_id, *, compensation_id, actor, project_id=None, authorize_change=None):
         with self._lock, self._database() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             original = connection.execute(
-                "SELECT project_id, before_state, receipt FROM changesets WHERE change_id = ?",
+                "SELECT project_id, before_state, receipt, compensates FROM changesets WHERE change_id = ?",
                 (change_id,),
             ).fetchone()
+            if project_id is not None and (original is None or original["project_id"] != project_id):
+                raise PermissionError("Changeset must belong to the project")
             if original is None:
                 raise ValueError(f"Unknown changeset {change_id!r}")
+
+            if project_id is not None:
+                if original["compensates"] is not None:
+                    raise DraftConflict("Compensation cannot itself be compensated")
+                executed = connection.execute(
+                    "SELECT change_id FROM changesets WHERE compensates = ? LIMIT 1", (change_id,)
+                ).fetchone()
+                if executed is not None and executed["change_id"] != compensation_id:
+                    raise DraftConflict("The changeset was already compensated")
 
             before_state = json.loads(original["before_state"])
             versions = json.loads(original["receipt"])["versions"]
@@ -28,7 +43,8 @@ class ChangeSetStore(SQLiteKnowledgeStore):
                 {
                     "doc_id": doc_id,
                     "expected_version": version,
-                    **(before_state[doc_id] or {"text": "", "readers": []}),
+                    "text": before_state[doc_id]["text"] if before_state[doc_id] else "",
+                    "readers": before_state[doc_id]["readers"] if before_state[doc_id] else [],
                 }
                 for doc_id, version in versions.items()
             ]
@@ -38,12 +54,91 @@ class ChangeSetStore(SQLiteKnowledgeStore):
                 original["project_id"],
                 actor,
                 changes,
-                compensates=change_id,
+                compensates=change_id, authorize_change=authorize_change,
             )
+
+    def save_draft(self, project_id, draft_id, actor, change, *, authorize_change, validate_batch, max_drafts):
+        with self._lock, self._database() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            versions = connection.execute(
+                "SELECT COUNT(*), MAX(revision) FILTER (WHERE draft_id = ?) FROM drafts WHERE project_id = ?",
+                (draft_id, project_id),
+            ).fetchone()
+            if versions[0] >= max_drafts:
+                return None
+            owner = connection.execute(
+                "SELECT author FROM drafts WHERE project_id = ? AND draft_id = ? LIMIT 1",
+                (project_id, draft_id),
+            ).fetchone()
+            if owner is not None and owner["author"] != actor:
+                raise PermissionError("Draft belongs to another author")
+            doc_id = change["doc_id"]
+            previous = self._current_state(connection, project_id, doc_id)
+            authorize_change(change, previous)
+            if change["expected_version"] != (previous["version"] if previous else 0):
+                raise DraftConflict("The knowledge version changed")
+            validate_batch(connection, {doc_id: previous}, [change])
+            revision = (versions[1] or 0) + 1
+            connection.execute(
+                "INSERT INTO drafts (project_id, draft_id, revision, author, payload) VALUES (?, ?, ?, ?, ?)",
+                (project_id, draft_id, revision, actor, json.dumps(change, sort_keys=True)),
+            )
+            return revision
+
+    def has_draft(self, project_id, draft_id, revision, *, actor):
+        with self._lock, self._database() as connection:
+            return connection.execute(
+                "SELECT 1 FROM drafts WHERE project_id = ? AND draft_id = ? AND revision = ? AND author = ?",
+                (project_id, draft_id, revision, actor),
+            ).fetchone() is not None
+
+    def publish_draft(self, project_id, draft_id, revision, *, actor, change_id,
+                      authorize_publish, authorize_change, validate_batch):
+        with self._lock, self._database() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            draft = connection.execute(
+                "SELECT revision, payload, change_id FROM drafts "
+                "WHERE project_id = ? AND draft_id = ? ORDER BY revision DESC LIMIT 1",
+                (project_id, draft_id),
+            ).fetchone()
+            if draft is None or not authorize_publish(draft["revision"]):
+                raise PermissionError("Approval for the latest draft revision is required")
+            if draft["change_id"] not in (None, change_id):
+                raise DraftConflict("The draft was already published")
+            if draft["change_id"] is None and connection.execute(
+                "SELECT 1 FROM changesets WHERE change_id = ?", (change_id,)
+            ).fetchone():
+                raise DraftConflict("Publication requires a new changeset ID")
+            receipt = self._record_changeset(
+                connection, change_id, project_id, actor, [json.loads(draft["payload"])],
+                compensates=None, authorize_change=authorize_change, validate_batch=validate_batch,
+            )
+            connection.execute(
+                "UPDATE drafts SET change_id = ? WHERE project_id = ? AND draft_id = ? AND revision = ?",
+                (change_id, project_id, draft_id, revision),
+            )
+            return receipt
+
+    @staticmethod
+    def _current_state(connection, project_id, doc_id):
+        previous = connection.execute(
+            "SELECT id, version, text FROM document_revisions WHERE project_id = ? AND doc_id = ? "
+            "ORDER BY version DESC LIMIT 1",
+            (project_id, doc_id),
+        ).fetchone()
+        if previous is None:
+            return None
+        readers = connection.execute(
+            "SELECT subject FROM revision_readers WHERE revision_id = ? ORDER BY subject", (previous["id"],)
+        )
+        return {
+            "version": previous["version"], "text": previous["text"],
+            "readers": [row["subject"] for row in readers],
+        }
 
     @staticmethod
     def _record_changeset(connection, change_id, project_id, actor, changes, *, compensates,
-                          authorize_change=None):
+                          authorize_change=None, validate_batch=None):
         payload = json.dumps(changes, sort_keys=True)
         existing = connection.execute(
             """
@@ -70,33 +165,9 @@ class ChangeSetStore(SQLiteKnowledgeStore):
             if doc_id in before_state:
                 raise ValueError(f"Duplicate document {doc_id!r} in changeset")
 
-            previous = connection.execute(
-                """
-                SELECT id, version, text
-                FROM document_revisions
-                WHERE project_id = ? AND doc_id = ?
-                ORDER BY version DESC
-                LIMIT 1
-                """,
-                (project_id, doc_id),
-            ).fetchone()
+            previous = ChangeSetStore._current_state(connection, project_id, doc_id)
             current_version = previous["version"] if previous is not None else 0
-            if previous is None:
-                before_state[doc_id] = None
-            else:
-                readers = connection.execute(
-                    """
-                    SELECT subject FROM revision_readers
-                    WHERE revision_id = ?
-                    ORDER BY subject
-                    """,
-                    (previous["id"],),
-                )
-                before_state[doc_id] = {
-                    "text": previous["text"],
-                    "readers": [row["subject"] for row in readers],
-                }
-
+            before_state[doc_id] = previous
             if authorize_change is not None:
                 authorize_change(change, before_state[doc_id])
             if current_version != expected_version:
@@ -104,6 +175,9 @@ class ChangeSetStore(SQLiteKnowledgeStore):
                     f"Version conflict for document {doc_id!r}. "
                     f"Expected {expected_version}, found {current_version}."
                 )
+
+        if validate_batch is not None:
+            validate_batch(connection, before_state, changes)
 
         versions = {}
         for change in changes:

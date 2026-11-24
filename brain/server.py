@@ -1,15 +1,28 @@
 import ipaddress
 import json
+import re
 import socket
 import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
+from uuid import uuid4
 
 from . import policy
+from .live_workflow import ACTIONS, WorkflowError, validate_change
+from .storage.changesets import DraftConflict
 from .write_access import ApprovalRegistry, check_write_access
 
 
 _MAX_JSON_BYTES = 256 * 1024
+_TRACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def valid_trace_id(value):
+    return isinstance(value, str) and _TRACE.fullmatch(value) is not None
+
+
+def _invalid_json_constant(value):
+    raise ValueError("JSON constants must be finite")
 
 
 class PayloadTooLarge(ValueError):
@@ -20,16 +33,17 @@ _DATA_ACTIONS = {"/read": "read", "/search": "read", "/write": "write"}
 
 
 class KnowledgeService:
-    def __init__(self, store, changesets, sessions, *, project_subjects=None):
+    def __init__(self, store, changesets, sessions, *, project_subjects=None, workflow=None):
         self._store = store
         self._changesets = changesets
         self._sessions = sessions
         self._project_subjects = project_subjects or {}
+        self._workflow = workflow
         self._approvals = ApprovalRegistry()
         self._lock = Lock()
         self._closed = False
 
-    def dispatch(self, method, path, *, token=None, body=None):
+    def dispatch(self, method, path, *, token=None, body=None, trace_id=None):
         with self._lock:
             if method == "GET" and path == "/health":
                 return 200, {"status": "ok"}
@@ -45,6 +59,8 @@ class KnowledgeService:
                 self._sessions.revoke(token)
                 return 200, {"status": "logged_out"}
             action = "publish" if path == "/approval" else _DATA_ACTIONS.get(path)
+            if action is None and self._workflow is not None:
+                action = ACTIONS.get(path)
             if action is None:
                 return 404, {"error": "not_found"}
 
@@ -64,6 +80,10 @@ class KnowledgeService:
 
             subject = actor["actor_id"]
             try:
+                if self._workflow is not None and path not in ("/identity", "/ops/audit-summary"):
+                    self._workflow.check_directives(actor, body, trace_id or uuid4().hex)
+                if path in ACTIONS:
+                    return self._workflow.dispatch(path, actor, token, body, trace_id, self._approvals)
                 if path == "/read":
                     return self._read(project_id, subject, body)
                 if path == "/search":
@@ -72,9 +92,18 @@ class KnowledgeService:
                         return 400, {"error": "invalid_request"}
                     return 200, {"results": self._store.search(project_id, query, subject=subject)}
                 return self._write(actor, token, body)
+            except WorkflowError as error:
+                return error.status, error.response
+            except ValueError as error:
+                message = str(error)
+                if isinstance(error, DraftConflict) or message.startswith("Version conflict ") or (
+                    message.startswith("Changeset ") and message.endswith(" already has a different payload")
+                ):
+                    return 409, {"error": "conflict"}
+                return 400, {"error": "invalid_request"}
             except PermissionError:
                 return 403, {"error": "forbidden"}
-            except (ValueError, OverflowError, UnicodeError):
+            except (OverflowError, TypeError, RecursionError):
                 return 400, {"error": "invalid_request"}
             except sqlite3.Error:
                 return 500, {"error": "storage_error"}
@@ -123,37 +152,22 @@ class KnowledgeService:
         if not isinstance(change_id, str) or not isinstance(changes, list):
             return 400, {"error": "invalid_request"}
         for change in changes:
-            if not isinstance(change, dict):
-                return 400, {"error": "invalid_request"}
-            readers = change.get("readers")
-            if (
-                not isinstance(change.get("doc_id"), str)
-                or not isinstance(change.get("text"), str)
-                or type(change.get("expected_version")) is not int
-                or not isinstance(readers, list)
-                or any(not isinstance(reader, str) for reader in readers)
-            ):
-                return 400, {"error": "invalid_request"}
-        try:
-            members = self._project_subjects.get(project_id, {subject})
-            approved = self._approvals.valid(token, "write", body)
-            for change in changes:
-                if not set(change["readers"]).issubset(members):
-                    raise PermissionError("Readers must belong to the project")
-            def authorize_change(change, previous):
-                check_write_access(actor, change, previous, approved=approved)
+            validate_change(change)
+        approved = self._approvals.valid(token, "write", body)
+        if self._workflow is not None:
+            return 200, self._workflow.write(actor, body, approved=approved)
 
-            receipt = self._changesets.apply(
-                change_id, project_id, subject, changes, authorize_change=authorize_change
-            )
-        except ValueError as error:
-            message = str(error)
-            if message.startswith("Version conflict ") or (
-                message.startswith("Changeset ") and message.endswith(" already has a different payload")
-            ):
-                return 409, {"error": "conflict"}
-            return 400, {"error": "invalid_request"}
-        return 200, receipt
+        members = self._project_subjects.get(project_id, {subject})
+        for change in changes:
+            if not set(change["readers"]).issubset(members):
+                raise PermissionError("Readers must belong to the project")
+
+        def authorize_change(change, previous):
+            check_write_access(actor, change, previous, approved=approved)
+
+        return 200, self._changesets.apply(
+            change_id, project_id, subject, changes, authorize_change=authorize_change
+        )
 
     def close(self):
         with self._lock:
@@ -164,10 +178,23 @@ class KnowledgeService:
 
 
 class _KnowledgeHandler(BaseHTTPRequestHandler):
+    def _set_trace(self):
+        values = self.headers.get_all("X-Trace-Id", [])
+        self.trace_id = None
+        if len(values) > 1 or (values and not valid_trace_id(values[0])):
+            self.close_connection = True
+            self._send_json(400, {"error": "invalid_trace_id"})
+            return False
+        self.trace_id = values[0] if values else uuid4().hex
+        return True
+
     def do_GET(self):
-        self._dispatch()
+        if self._set_trace():
+            self._dispatch()
 
     def do_POST(self):
+        if not self._set_trace():
+            return
         try:
             body = self._read_json()
         except PayloadTooLarge:
@@ -201,7 +228,7 @@ class _KnowledgeHandler(BaseHTTPRequestHandler):
                 raise ValueError("Incomplete request body")
             payload.extend(chunk)
             remaining -= len(chunk)
-        return json.loads(payload)
+        return json.loads(payload, parse_constant=_invalid_json_constant)
 
     def _dispatch(self, body=None):
         authorization = self.headers.get_all("Authorization", [])
@@ -211,7 +238,9 @@ class _KnowledgeHandler(BaseHTTPRequestHandler):
             if len(parts) == 2 and parts[0].lower() == "bearer":
                 token = parts[1]
         path = self.path.partition("?")[0]
-        status, response = self.server.service.dispatch(self.command, path, token=token, body=body)
+        status, response = self.server.service.dispatch(
+            self.command, path, token=token, body=body, trace_id=self.trace_id
+        )
         self._send_json(status, response)
 
     def _send_json(self, status, response):
@@ -220,6 +249,8 @@ class _KnowledgeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
+        if self.trace_id is not None:
+            self.send_header("X-Trace-Id", self.trace_id)
         self.end_headers()
         self.wfile.write(payload)
 
