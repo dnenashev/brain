@@ -4,23 +4,25 @@ import http.client
 import ipaddress
 import json
 import os
+import re
 import stat
 from contextlib import closing
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 from .adapters.mcp import CodeMode
+from .adapters.secret_broker import SecretBroker
 from .adapters.swarm_mcp import SwarmReadOnly
 from .live_workflow import parse_reference
 from .sdk.api import VersionedSDK
 from .server import valid_trace_id
 
 
-def _credential():
+def _credential(path):
     def owner_only(path, flags):
         return os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK)
 
-    with open(os.environ["BRAIN_CREDENTIAL_FILE"], encoding="utf-8", opener=owner_only) as source:
+    with open(path, encoding="utf-8", opener=owner_only) as source:
         info = os.fstat(source.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
             raise ValueError("Credential file must be an owner-only regular file")
@@ -44,11 +46,17 @@ class LocalKnowledgeClient:
             raise ValueError("Invalid trace ID")
         self.project = os.environ["BRAIN_PROJECT_ID"]
         self.token = None
-        self.token = self.request("/session", credential=_credential())["token"]
+        self.token = SecretBroker(_credential).invoke(os.environ["BRAIN_CREDENTIAL_FILE"], self._exchange)
         identity = self.call("/identity")
         if identity["project_id"] != self.project:
             raise PermissionError("Credential belongs to another project")
         self.role = identity["role"]
+
+    def _exchange(self, credential):
+        token = self.request("/session", credential=credential)["token"]
+        if not isinstance(token, str) or re.fullmatch(r"[A-Za-z0-9_-]{43}", token) is None:
+            raise ValueError("Invalid session response")
+        return token
 
     def request(self, path, **payload):
         headers = {"Content-Type": "application/json", "X-Trace-Id": self.trace}

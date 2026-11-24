@@ -83,7 +83,7 @@ class LiveWorkflow:
         if outcome["outcome"] == "OUTCOME_NONE_CLARIFICATION":
             raise WorkflowError(422, "directive_conflict", **outcome)
 
-    def _access(self, actor, *, approved=False, restore=False, stage=False, publish=False):
+    def _access(self, actor, *, approved=False, restore=False, stage=False):
         subject = actor["actor_id"]
         members = self.subjects[actor["project_id"]]
 
@@ -96,7 +96,7 @@ class LiveWorkflow:
             elif stage:
                 if subject not in change["readers"] or (previous and subject not in previous["readers"]):
                     raise PermissionError("Document access is required")
-            elif not publish or previous is not None:
+            else:
                 check_write_access(actor, change, previous, approved=approved)
 
         return authorize
@@ -241,9 +241,11 @@ class LiveWorkflow:
         return (201 if created else 200), {"task_id": task_id, "candidate_sha": sha}
 
     def _publish(self, actor, token, body, approvals):
+        with approvals.commit(token, "publish", body, required=True):
+            return self._commit_publication(actor, body)
+
+    def _commit_publication(self, actor, body):
         project_id = actor["project_id"]
-        if not approvals.valid(token, "publish", body):
-            raise PermissionError("Exact publication approval is required")
         draft_id, revision = self._id(body, "draft_id"), self._revision(body)
         task_id, change_id = self._id(body, "task_id"), self._id(body, "change_id")
         sha = body.get("candidate_sha")
@@ -257,7 +259,7 @@ class LiveWorkflow:
         return self.changesets.publish_draft(
             project_id, draft_id, revision, actor=actor["actor_id"], change_id=change_id,
             authorize_publish=lambda current: policy.authorize(actor, request, current_revision=current, approval=approval),
-            authorize_change=self._access(actor, approved=True, publish=True), validate_batch=self._validate_batch(actor),
+            authorize_change=self._access(actor, approved=True), validate_batch=self._validate_batch(actor),
         )
 
     def _audit_summary(self, actor, trace_id):

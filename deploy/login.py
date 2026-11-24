@@ -45,7 +45,8 @@ def install_login(server, sessions):
             token = None
             try:
                 lengths = self.headers.get_all("Content-Length", [])
-                if len(lengths) != 1 or "Transfer-Encoding" in self.headers:
+                if (len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdecimal()
+                        or "Transfer-Encoding" in self.headers):
                     raise ValueError
                 length = int(lengths[0])
                 if not 0 < length <= 8192 or self.headers.get_content_type() != "application/x-www-form-urlencoded":

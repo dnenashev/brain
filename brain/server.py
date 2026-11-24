@@ -145,15 +145,18 @@ class KnowledgeService:
         return 200, {"approval": approval}
 
     def _write(self, actor, token, body):
-        project_id = actor["project_id"]
-        subject = actor["actor_id"]
         change_id = body.get("change_id")
         changes = body.get("changes")
         if not isinstance(change_id, str) or not isinstance(changes, list):
             return 400, {"error": "invalid_request"}
         for change in changes:
             validate_change(change)
-        approved = self._approvals.valid(token, "write", body)
+        with self._approvals.commit(token, "write", body) as approved:
+            return self._apply_write(actor, body, approved=approved)
+
+    def _apply_write(self, actor, body, *, approved):
+        project_id, subject = actor["project_id"], actor["actor_id"]
+        change_id, changes = body["change_id"], body["changes"]
         if self._workflow is not None:
             return 200, self._workflow.write(actor, body, approved=approved)
 
