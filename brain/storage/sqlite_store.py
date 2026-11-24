@@ -1,4 +1,6 @@
 import sqlite3
+from contextlib import closing, contextmanager
+from weakref import finalize
 from pathlib import Path
 from threading import Lock
 
@@ -61,16 +63,47 @@ def put_revision_in_transaction(connection, project_id, doc_id, text, readers):
 class SQLiteKnowledgeStore:
     def __init__(self, path):
         self._lock = Lock()
-        self._connection = sqlite3.connect(
-            path, isolation_level=None, check_same_thread=False
-        )
+        self._path = ":memory:" if str(path) == ":memory:" else Path(path).resolve()
+        self._closed = False
+        self._memory = self._connect() if self._path == ":memory:" else None
+        self._close_memory = finalize(self, self._memory.close) if self._memory is not None else None
         try:
-            self._connection.row_factory = sqlite3.Row
-            self._connection.execute("PRAGMA foreign_keys = ON")
             self._migrate()
         except BaseException:
-            self._connection.close()
+            self.close()
             raise
+
+    def _connect(self):
+        connection = sqlite3.connect(self._path, isolation_level=None, check_same_thread=False)
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+        except BaseException:
+            connection.close()
+            raise
+        return connection
+
+    @contextmanager
+    def _database(self):
+        if self._closed:
+            raise sqlite3.ProgrammingError("Knowledge store is closed")
+        if self._memory is not None:
+            yield self._memory
+        else:
+            with closing(self._connect()) as connection:
+                yield connection
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+            if self._close_memory is not None:
+                self._close_memory()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
 
     def _migrate(self):
         directory = Path(__file__).with_name("migrations")
@@ -85,7 +118,7 @@ class SQLiteKnowledgeStore:
         ):
             raise RuntimeError("SQLite migrations must be numbered consecutively from 001.sql")
 
-        with self._connection as connection:
+        with self._database() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if not 0 <= version <= len(migrations):
@@ -97,15 +130,15 @@ class SQLiteKnowledgeStore:
                 connection.execute(f"PRAGMA user_version = {number}")
 
     def put_revision(self, project_id, doc_id, text, readers):
-        with self._lock, self._connection as connection:
+        with self._lock, self._database() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             return put_revision_in_transaction(
                 connection, project_id, doc_id, text, readers
             )
 
     def read(self, project_id, doc_id, *, subject, version=None):
-        with self._lock:
-            row = self._connection.execute(
+        with self._lock, self._database() as connection:
+            row = connection.execute(
                 """
                 WITH latest AS (
                     SELECT id, version FROM document_revisions
@@ -135,8 +168,8 @@ class SQLiteKnowledgeStore:
         return dict(row) if row is not None else None
 
     def snapshot(self, project_id, *, subject):
-        with self._lock:
-            rows = self._connection.execute(
+        with self._lock, self._database() as connection:
+            rows = connection.execute(
                 """
                 WITH latest AS (
                     SELECT doc_id, MAX(version) AS version
@@ -162,8 +195,13 @@ class SQLiteKnowledgeStore:
     def search(self, project_id, query, *, subject):
         if not query.strip():
             return []
-        with self._lock:
-            rows = self._connection.execute(
+        with self._lock, self._database() as connection:
+            return self._search(connection, project_id, query, subject)
+
+    @staticmethod
+    def _search(connection, project_id, query, subject):
+        try:
+            rows = connection.execute(
                 """
                 SELECT revision.doc_id, revision.version,
                     snippet(current_revision_fts, 0, '[', ']', '...', 16) AS snippet
@@ -179,4 +217,9 @@ class SQLiteKnowledgeStore:
                 """,
                 {"project_id": project_id, "query": query, "subject": subject},
             ).fetchall()
+        except sqlite3.OperationalError as error:
+            message = str(error).lower()
+            if message.startswith(("fts5:", "unterminated string", "no such column:", "malformed match expression:")):
+                raise ValueError("Invalid full-text query") from None
+            raise
         return [dict(row) for row in rows]

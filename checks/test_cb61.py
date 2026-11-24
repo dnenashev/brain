@@ -1,5 +1,6 @@
 """Independent SQLite version and search ACL checks."""
 
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
@@ -29,7 +30,7 @@ class ServerStorage(unittest.TestCase):
             if path.stem.isascii() and path.stem.isdecimal()
         ]
         self.assertTrue(versions)
-        with sqlite3.connect(self.path) as database:
+        with closing(sqlite3.connect(self.path)) as database:
             self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], max(versions))
 
     def test_search_limits_project_acl_and_current_version(self):

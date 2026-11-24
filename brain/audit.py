@@ -15,11 +15,11 @@ _DIAGNOSTIC_FIELDS = ("duration_ms", "queue_depth", "bytes")
 
 class AuditLog:
     def __init__(self, path):
-        database = Path(path).resolve()
+        self._database = database = Path(path).resolve()
         self._lock = Lock()
-        self._connection = sqlite3.connect(database, check_same_thread=False)
-        with self._connection:
-            self._connection.execute(
+        self._closed = False
+        with closing(sqlite3.connect(database)) as connection, connection:
+            connection.execute(
                 """CREATE TABLE IF NOT EXISTS audit_events (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT,
                     trace_id TEXT NOT NULL,
@@ -54,8 +54,10 @@ class AuditLog:
                 elif type(value) is float and math.isfinite(value) and value >= 0:
                     redacted[key] = value
 
-        with self._lock, self._connection:
-            row = self._connection.execute(
+        with self._lock, closing(sqlite3.connect(self._database)) as connection, connection:
+            if self._closed:
+                raise sqlite3.ProgrammingError("Audit log is closed")
+            row = connection.execute(
                 "INSERT INTO audit_events (trace_id, step, outcome, timestamp, details) "
                 "VALUES (?, ?, ?, ?, ?)",
                 (trace_id, step, outcome, datetime.now(timezone.utc).isoformat(), json.dumps(redacted)),
@@ -64,4 +66,4 @@ class AuditLog:
 
     def close(self):
         with self._lock:
-            self._connection.close()
+            self._closed = True

@@ -1,4 +1,5 @@
-from http.cookies import SimpleCookie
+from http.cookies import CookieError, SimpleCookie
+from secrets import compare_digest
 from urllib.parse import parse_qs
 
 
@@ -37,6 +38,8 @@ def install_login(server, sessions):
             self._login_response(200, _FORM, Content_Type="text/html; charset=utf-8")
 
         def do_POST(self):
+            if self.path.partition("?")[0] == "/logout":
+                return self._logout()
             if not self._is_login():
                 return super().do_POST()
             token = None
@@ -66,5 +69,30 @@ def install_login(server, sessions):
             session["httponly"] = True
             session["samesite"] = "Strict"
             self._login_response(303, Location="/", Set_Cookie=session.OutputString())
+
+        def _logout(self):
+            try:
+                cookie = SimpleCookie("; ".join(self.headers.get_all("Cookie", [])))
+                morsel = cookie.get("brain_session")
+                token = morsel.value if morsel is not None else None
+                expected = sessions.csrf(token)
+                lengths = self.headers.get_all("Content-Length", [])
+                if (len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdecimal()
+                        or self.headers.get("Transfer-Encoding") is not None
+                        or self.headers.get_content_type() != "application/x-www-form-urlencoded"):
+                    raise ValueError
+                length = int(lengths[0])
+                if not 0 < length <= 1024:
+                    raise ValueError
+                fields = parse_qs(self.rfile.read(length).decode("ascii"), max_num_fields=2)
+                values = fields.get("form_token", [])
+                if expected is None or len(values) != 1 or not compare_digest(expected.encode(), values[0].encode()):
+                    raise ValueError
+            except (CookieError, ValueError, OSError):
+                self.close_connection = True
+                return self._login_response(403, Connection="close")
+            sessions.revoke(token)
+            self._login_response(303, Location="/login",
+                                 Set_Cookie="brain_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
 
     server.RequestHandlerClass = LoginHandler

@@ -9,6 +9,13 @@ from . import policy
 from .write_access import ApprovalRegistry, check_write_access
 
 
+_MAX_JSON_BYTES = 256 * 1024
+
+
+class PayloadTooLarge(ValueError):
+    pass
+
+
 _DATA_ACTIONS = {"/read": "read", "/search": "read", "/write": "write"}
 
 
@@ -34,6 +41,9 @@ class KnowledgeService:
                 return 404, {"error": "not_found"}
             if path == "/session":
                 return self._open_session(body)
+            if path == "/logout":
+                self._sessions.revoke(token)
+                return 200, {"status": "logged_out"}
             action = "publish" if path == "/approval" else _DATA_ACTIONS.get(path)
             if action is None:
                 return 404, {"error": "not_found"}
@@ -64,7 +74,7 @@ class KnowledgeService:
                 return self._write(actor, token, body)
             except PermissionError:
                 return 403, {"error": "forbidden"}
-            except (OverflowError, UnicodeError):
+            except (ValueError, OverflowError, UnicodeError):
                 return 400, {"error": "invalid_request"}
             except sqlite3.Error:
                 return 500, {"error": "storage_error"}
@@ -148,6 +158,9 @@ class KnowledgeService:
     def close(self):
         with self._lock:
             self._closed = True
+            self._store.close()
+            if self._changesets is not self._store:
+                self._changesets.close()
 
 
 class _KnowledgeHandler(BaseHTTPRequestHandler):
@@ -157,7 +170,12 @@ class _KnowledgeHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             body = self._read_json()
+        except PayloadTooLarge:
+            self.close_connection = True
+            self._send_json(413, {"error": "payload_too_large"})
+            return
         except (ValueError, OverflowError, RecursionError):
+            self.close_connection = True
             self._send_json(400, {"error": "invalid_request"})
             return
         self._dispatch(body)
@@ -172,6 +190,8 @@ class _KnowledgeHandler(BaseHTTPRequestHandler):
         if not length.isascii() or not length.isdecimal():
             raise ValueError("Invalid content length")
         remaining = int(length)
+        if remaining > _MAX_JSON_BYTES:
+            raise PayloadTooLarge
         if remaining == 0:
             return None
         payload = bytearray()

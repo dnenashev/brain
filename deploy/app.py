@@ -5,7 +5,6 @@ import signal
 from contextlib import ExitStack
 from fcntl import LOCK_EX, LOCK_NB, flock
 from pathlib import Path
-from secrets import token_urlsafe
 from tempfile import NamedTemporaryFile
 from threading import Event, Lock, Thread
 from time import monotonic
@@ -161,7 +160,7 @@ def run(config):
         cleanup.callback(knowledge.close)
         state = ReviewState(data_dir / 'review.json', config['review_seed'], audit)
         web = ReviewWeb(sessions, list_reviews=state.list_reviews, get_review=state.get_review,
-                        record_decision=state.record_decision, form_token=token_urlsafe(32))
+                        record_decision=state.record_decision)
         bind = config['bind']
         api = cleanup.enter_context(make_http_server(knowledge, host=bind, port=config['http_port']))
         review = cleanup.enter_context(make_review_server(web, host=bind, port=config['review_port']))

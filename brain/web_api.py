@@ -3,6 +3,7 @@ import re
 import socket
 from collections.abc import Mapping
 from http.cookies import CookieError, SimpleCookie
+from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address
 from secrets import compare_digest
@@ -23,7 +24,7 @@ def _error(status, code):
 
 
 class ReviewWeb:
-    def __init__(self, sessions, *, list_reviews, get_review, record_decision, form_token):
+    def __init__(self, sessions, *, list_reviews, get_review, record_decision, form_token=None):
         self._sessions = sessions
         self._list_reviews = list_reviews
         self._get_review = get_review
@@ -44,7 +45,13 @@ class ReviewWeb:
 
         path = path.partition("?")[0]
         if method == "GET" and path == "/":
-            return 200, _HTML, render_queue(self._list_reviews(project_id))
+            queue = render_queue(self._list_reviews(project_id))
+            csrf = self._token_for(token)
+            if csrf is not None:
+                form = ('<form method="post" action="/logout"><button>Sign out</button>'
+                        f'<input type="hidden" name="form_token" value="{escape(csrf, quote=True)}"></form>')
+                queue = queue.replace("</body>", form + "</body>")
+            return 200, _HTML, queue
 
         route = _TASK_ROUTE.fullmatch(path)
         if route is None:
@@ -57,7 +64,7 @@ class ReviewWeb:
 
         if decision_suffix:
             if method == "POST" and prefix == "review":
-                return self._decide(project_id, task_id, actor["actor_id"], form)
+                return self._decide(project_id, task_id, actor["actor_id"], form, token)
             return _error(404, "not_found")
         if method != "GET":
             return _error(404, "not_found")
@@ -68,11 +75,14 @@ class ReviewWeb:
         if prefix == "api/reviews":
             card = {field: review.get(field) for field in REVIEW_FIELDS}
             return 200, _JSON, json.dumps(card)
-        return 200, _HTML, render_review(review, task_id=task_id, form_token=self._form_token)
+        return 200, _HTML, render_review(review, task_id=task_id, form_token=self._token_for(token))
 
-    def _decide(self, project_id, task_id, actor_id, form):
+    def _token_for(self, token):
+        return self._form_token if self._form_token is not None else self._sessions.csrf(token)
+
+    def _decide(self, project_id, task_id, actor_id, form, token):
         supplied_token = form.get("form_token") if isinstance(form, Mapping) else None
-        expected_token = self._form_token
+        expected_token = self._token_for(token)
         if (
             not isinstance(supplied_token, str)
             or not isinstance(expected_token, str)

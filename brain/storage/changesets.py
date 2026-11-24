@@ -5,7 +5,7 @@ from .sqlite_store import SQLiteKnowledgeStore, put_revision_in_transaction
 
 class ChangeSetStore(SQLiteKnowledgeStore):
     def apply(self, change_id, project_id, actor, changes, *, authorize_change=None):
-        with self._lock, self._connection as connection:
+        with self._lock, self._database() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             return self._record_changeset(
                 connection, change_id, project_id, actor, changes, compensates=None,
@@ -13,7 +13,7 @@ class ChangeSetStore(SQLiteKnowledgeStore):
             )
 
     def compensate(self, change_id, *, compensation_id, actor):
-        with self._lock, self._connection as connection:
+        with self._lock, self._database() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             original = connection.execute(
                 "SELECT project_id, before_state, receipt FROM changesets WHERE change_id = ?",
