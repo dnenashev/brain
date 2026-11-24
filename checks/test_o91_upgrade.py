@@ -1,3 +1,4 @@
+import hashlib
 import http.client
 import json
 import os
@@ -90,6 +91,11 @@ class UpgradeAcceptance(unittest.TestCase):
         config = json.loads(self.config.read_text())
         config["limits"].update(active_documents=12, versions=50)
         self.config.write_text(json.dumps(config))
+        identities = json.loads(self.credentials.read_text())
+        if not any(item["actor_id"] == "reader" for item in identities):
+            identities.append({"actor_id": "reader", "project_id": PROJECT, "role": "reader",
+                               "credential_sha256": hashlib.sha256(b"reader-secret").hexdigest()})
+            self.credentials.write_text(json.dumps(identities))
         self.app = harness.LiveAcceptance.start_app(self)
         return self.app
 
@@ -144,7 +150,7 @@ class UpgradeAcceptance(unittest.TestCase):
         return result["result"]
 
     def test_upgrade_on_live_mac_and_restore_snapshot(self):
-        readers = ["agent", "reviewer", "writer"]
+        readers = ["agent", "reviewer", "writer", "reader"]
         prior = {"change_id": "baseline-u3", "changes": [self.change("Source fragment", doc=SOURCE, readers=readers)]}
         approval = self.confirm("write", prior, token=self.agent)
         self.assertEqual(self.api("/write", token=self.agent, approval=approval, **prior)[0], 200)
@@ -184,9 +190,13 @@ class UpgradeAcceptance(unittest.TestCase):
 
         live = self.draft_review("readable-publication", readers, metadata={"source": f"doc:{SOURCE}@1"})
         pending = self.draft_review("pending-recovery", readers, rule="next-rule")
+        evidence = [{"check": "grounding", "run": "run-u3", "result_id": "result-u3", "outcome": "pass"}]
+        reader = self.api("/session", credential="reader-secret")[1]["token"]
+        self.assertEqual(self.api("/check", token=reader, deliveries=evidence)[0], 200)
+        self.assertEqual(self.api("/check", token=reader, task_id=live["task_id"], rule_ids=[SOURCE],
+                                  deliveries=evidence)[0], 403)
         self.assertEqual(self.api("/check", token=self.writer, task_id=live["task_id"], rule_ids=[SOURCE],
-                                  deliveries=[{"check": "grounding", "run": "run-u3", "result_id": "result-u3",
-                                               "outcome": "pass"}])[0], 200)
+                                  deliveries=evidence)[0], 200)
         report = self.api("/ops/audit-summary", token=self.reviewer)[1]
         queue_lag = report["telemetry"]["queue_lag_seconds"]
         self.assertGreater(queue_lag, 0)

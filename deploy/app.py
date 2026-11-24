@@ -17,7 +17,6 @@ from brain.server import KnowledgeService, make_http_server
 from brain.session import SessionRegistry
 from brain.storage.changesets import ChangeSetStore
 from brain.storage.review_state import ReviewState
-from brain.storage.sqlite_store import SQLiteKnowledgeStore
 from brain.web_api import ReviewWeb, make_review_server
 
 from .config import authenticate, load_config, load_credentials
@@ -123,14 +122,13 @@ def run(config):
         project_subjects = {}
         for _, identity in records:
             project_subjects.setdefault(identity['project_id'], set()).add(identity['actor_id'])
-        store = cleanup.enter_context(SQLiteKnowledgeStore(database))
-        changesets = cleanup.enter_context(ChangeSetStore(database))
+        store = cleanup.enter_context(ChangeSetStore(database))
         state = ReviewState(store, data_dir / 'review.json', lambda: _seed_queue(config['review_seed']), audit)
-        workflow = LiveWorkflow(store, changesets, state, audit, project_subjects,
+        workflow = LiveWorkflow(store, store, state, audit, project_subjects,
                                 limits=config.get('limits'), directives=config.get('directives'),
                                 directive_files=config.get('directive_files'))
         knowledge = AuditedKnowledge(
-            store, changesets, sessions, audit, project_subjects=project_subjects, workflow=workflow,
+            store, store, sessions, audit, project_subjects=project_subjects, workflow=workflow,
             readiness=AuditReadiness(audit, recovery_owner="operator").check,
         )
         cleanup.callback(knowledge.close)

@@ -1,6 +1,7 @@
 """SQLite inbox and decision history for the local review UI."""
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from time import monotonic
 
@@ -106,13 +107,25 @@ class ReviewState:
                 "SELECT MIN(queued_at) FROM review_queue WHERE project_id = ?", (project_id,)
             ).fetchone()[0]
 
+    @contextmanager
+    def _mutation(self):
+        events = []
+        with self.store.connection() as connection:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                yield connection, events.append
+            for event in events:
+                self.audit.append(**event)
+
     def enqueue(self, card, *, record_links=None):
         started = monotonic()
-        with self.store.transaction() as connection:
+        with self._mutation() as (connection, audit):
             created, recorded = self._enqueue(connection, card, record_links)
-        self.audit.append(trace_id=recorded["trace_id"], project_id=recorded["project_id"], step="review_enqueued",
-                          outcome="ok" if created else "duplicate",
-                          details={"duration_ms": (monotonic() - started) * 1000})
+            audit({
+                "trace_id": recorded["trace_id"], "project_id": recorded["project_id"], "step": "review_enqueued",
+                "outcome": "ok" if created else "duplicate",
+                "details": {"duration_ms": (monotonic() - started) * 1000},
+            })
         return created
 
     @staticmethod
@@ -154,7 +167,7 @@ class ReviewState:
 
     def record_decision(self, project_id, task_id, candidate_sha, decision, comment, actor_id):
         started = monotonic()
-        with self.store.transaction() as connection:
+        with self._mutation() as (connection, audit):
             key = (project_id, task_id, candidate_sha)
             row = connection.execute(
                 "SELECT * FROM review_queue WHERE project_id = ? AND task_id = ? AND candidate_sha = ?", key
@@ -170,9 +183,11 @@ class ReviewState:
             connection.execute(
                 "DELETE FROM review_queue WHERE project_id = ? AND task_id = ? AND candidate_sha = ?", key
             )
-        self.audit.append(trace_id=card.get("trace_id") or task_id, project_id=project_id, step="decision",
-                          outcome="returned" if decision == "return" else "approved",
-                          details={"duration_ms": (monotonic() - started) * 1000})
+            audit({
+                "trace_id": card.get("trace_id") or task_id, "project_id": project_id, "step": "decision",
+                "outcome": "returned" if decision == "return" else "approved",
+                "details": {"duration_ms": (monotonic() - started) * 1000},
+            })
         return True
 
     @staticmethod

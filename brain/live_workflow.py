@@ -188,6 +188,8 @@ class LiveWorkflow:
         ):
             raise ValueError("Invalid check deliveries")
         if "task_id" in body or "rule_ids" in body:
+            if actor["role"] not in ("writer", "operator"):
+                raise PermissionError("Recording impact requires write access")
             task_id = self._id(body, "task_id")
             rule_ids = body.get("rule_ids")
             if not isinstance(rule_ids, list) or not rule_ids:
