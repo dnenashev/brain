@@ -101,8 +101,8 @@ class ReviewState:
 
 
 class AuditedKnowledge(KnowledgeService):
-    def __init__(self, store, changesets, sessions, audit):
-        super().__init__(store, changesets, sessions)
+    def __init__(self, store, changesets, sessions, audit, **options):
+        super().__init__(store, changesets, sessions, **options)
         self.audit = audit
 
     def dispatch(self, method, path, *, token=None, body=None):
@@ -151,7 +151,13 @@ def run(config):
         audit = AuditLog(data_dir / 'audit.db')
         cleanup.callback(audit.close)
         database = data_dir / 'knowledge.db'
-        knowledge = AuditedKnowledge(SQLiteKnowledgeStore(database), ChangeSetStore(database), sessions, audit)
+        project_subjects = {}
+        for _, identity in records:
+            project_subjects.setdefault(identity['project_id'], set()).add(identity['actor_id'])
+        knowledge = AuditedKnowledge(
+            SQLiteKnowledgeStore(database), ChangeSetStore(database), sessions, audit,
+            project_subjects=project_subjects,
+        )
         cleanup.callback(knowledge.close)
         state = ReviewState(data_dir / 'review.json', config['review_seed'], audit)
         web = ReviewWeb(sessions, list_reviews=state.list_reviews, get_review=state.get_review,

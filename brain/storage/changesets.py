@@ -4,11 +4,12 @@ from .sqlite_store import SQLiteKnowledgeStore, put_revision_in_transaction
 
 
 class ChangeSetStore(SQLiteKnowledgeStore):
-    def apply(self, change_id, project_id, actor, changes):
+    def apply(self, change_id, project_id, actor, changes, *, authorize_change=None):
         with self._lock, self._connection as connection:
             connection.execute("BEGIN IMMEDIATE")
             return self._record_changeset(
-                connection, change_id, project_id, actor, changes, compensates=None
+                connection, change_id, project_id, actor, changes, compensates=None,
+                authorize_change=authorize_change,
             )
 
     def compensate(self, change_id, *, compensation_id, actor):
@@ -41,7 +42,8 @@ class ChangeSetStore(SQLiteKnowledgeStore):
             )
 
     @staticmethod
-    def _record_changeset(connection, change_id, project_id, actor, changes, *, compensates):
+    def _record_changeset(connection, change_id, project_id, actor, changes, *, compensates,
+                          authorize_change=None):
         payload = json.dumps(changes, sort_keys=True)
         existing = connection.execute(
             """
@@ -79,12 +81,6 @@ class ChangeSetStore(SQLiteKnowledgeStore):
                 (project_id, doc_id),
             ).fetchone()
             current_version = previous["version"] if previous is not None else 0
-            if current_version != expected_version:
-                raise ValueError(
-                    f"Version conflict for document {doc_id!r}. "
-                    f"Expected {expected_version}, found {current_version}."
-                )
-
             if previous is None:
                 before_state[doc_id] = None
             else:
@@ -100,6 +96,14 @@ class ChangeSetStore(SQLiteKnowledgeStore):
                     "text": previous["text"],
                     "readers": [row["subject"] for row in readers],
                 }
+
+            if authorize_change is not None:
+                authorize_change(change, before_state[doc_id])
+            if current_version != expected_version:
+                raise ValueError(
+                    f"Version conflict for document {doc_id!r}. "
+                    f"Expected {expected_version}, found {current_version}."
+                )
 
         versions = {}
         for change in changes:

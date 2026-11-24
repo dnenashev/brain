@@ -6,16 +6,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 
 from . import policy
+from .write_access import ApprovalRegistry, check_write_access
 
 
 _DATA_ACTIONS = {"/read": "read", "/search": "read", "/write": "write"}
 
 
 class KnowledgeService:
-    def __init__(self, store, changesets, sessions):
+    def __init__(self, store, changesets, sessions, *, project_subjects=None):
         self._store = store
         self._changesets = changesets
         self._sessions = sessions
+        self._project_subjects = project_subjects or {}
+        self._approvals = ApprovalRegistry()
         self._lock = Lock()
         self._closed = False
 
@@ -31,7 +34,7 @@ class KnowledgeService:
                 return 404, {"error": "not_found"}
             if path == "/session":
                 return self._open_session(body)
-            action = _DATA_ACTIONS.get(path)
+            action = "publish" if path == "/approval" else _DATA_ACTIONS.get(path)
             if action is None:
                 return 404, {"error": "not_found"}
 
@@ -44,6 +47,8 @@ class KnowledgeService:
             # Document versions belong to the stores. These routes have no publish revision.
             revision = 0
             request = {"project_id": project_id, "action": action, "revision": revision}
+            if path == "/approval":
+                return self._issue_approval(actor, token, body)
             if not policy.authorize(actor, request, current_revision=revision):
                 return 403, {"error": "forbidden"}
 
@@ -56,7 +61,9 @@ class KnowledgeService:
                     if not isinstance(query, str):
                         return 400, {"error": "invalid_request"}
                     return 200, {"results": self._store.search(project_id, query, subject=subject)}
-                return self._write(project_id, subject, body)
+                return self._write(actor, token, body)
+            except PermissionError:
+                return 403, {"error": "forbidden"}
             except (OverflowError, UnicodeError):
                 return 400, {"error": "invalid_request"}
             except sqlite3.Error:
@@ -83,7 +90,24 @@ class KnowledgeService:
             return 404, {"error": "not_found"}
         return 200, document
 
-    def _write(self, project_id, subject, body):
+    def _issue_approval(self, actor, token, body):
+        if (actor.get("verified") is not True or actor.get("role") != "operator"
+                or body["project_id"] != actor.get("project_id")):
+            return 403, {"error": "forbidden"}
+        action = body.get("action")
+        request = body.get("request")
+        if (action not in ("write", "publish") or not isinstance(request, dict)
+                or request.get("project_id") != actor["project_id"] or "approval" in request):
+            return 400, {"error": "invalid_request"}
+        try:
+            approval = self._approvals.issue(token, action, request)
+        except (ValueError, TypeError, OverflowError, UnicodeError, RecursionError):
+            return 400, {"error": "invalid_request"}
+        return 200, {"approval": approval}
+
+    def _write(self, actor, token, body):
+        project_id = actor["project_id"]
+        subject = actor["actor_id"]
         change_id = body.get("change_id")
         changes = body.get("changes")
         if not isinstance(change_id, str) or not isinstance(changes, list):
@@ -101,7 +125,17 @@ class KnowledgeService:
             ):
                 return 400, {"error": "invalid_request"}
         try:
-            receipt = self._changesets.apply(change_id, project_id, subject, changes)
+            members = self._project_subjects.get(project_id, {subject})
+            approved = self._approvals.valid(token, "write", body)
+            for change in changes:
+                if not set(change["readers"]).issubset(members):
+                    raise PermissionError("Readers must belong to the project")
+            def authorize_change(change, previous):
+                check_write_access(actor, change, previous, approved=approved)
+
+            receipt = self._changesets.apply(
+                change_id, project_id, subject, changes, authorize_change=authorize_change
+            )
         except ValueError as error:
             message = str(error)
             if message.startswith("Version conflict ") or (
